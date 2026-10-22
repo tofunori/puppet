@@ -113,7 +113,8 @@ enum Capture {
     case notAllowed
 }
 
-// The target app's largest normal window, at most 900 px wide. ScreenCaptureKit itself is the test of
+// The target app's frontmost normal window, the one Computer Use works in (its focused window), at
+// most 900 px wide. The app's largest window showed an old document while puppet typed in a new one. ScreenCaptureKit itself is the test of
 // the Screen Recording permission: CGPreflightScreenCaptureAccess() can report false for an app that
 // System Settings lists as allowed.
 func captureWindow(of target: String) async -> Capture {
@@ -125,7 +126,7 @@ func captureWindow(of target: String) async -> Capture {
         return .notAllowed
     }
     let windows = content.windows.filter { $0.windowLayer == 0 && $0.frame.width > 200 && $0.frame.height > 120 && windowMatches($0, target: target) }
-    guard let window = windows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else { return .noWindow }
+    guard let window = frontmost(windows) else { return .noWindow }
     // The Computer Use cursor is a separate overlay window of the service. Capture the display area of
     // the target window with both the window and those overlays in it, so the cursor shows moving.
     let overlays = content.windows.filter { $0.owningApplication?.bundleIdentifier == "com.openai.sky.CUAService" }
@@ -150,6 +151,14 @@ func captureWindow(of target: String) async -> Capture {
         logLine("captureImage failed: \(error)")
         return .notAllowed
     }
+}
+
+// The window system lists on-screen windows front to back; ScreenCaptureKit's list has no order.
+func frontmost(_ windows: [SCWindow]) -> SCWindow? {
+    let ids = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
+        .compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+    let rank = Dictionary(ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+    return windows.min { (rank[$0.windowID] ?? .max) < (rank[$1.windowID] ?? .max) }
 }
 
 // The Computer Use service keeps a JPEG of the window it worked on ("TextEdit Screenshot <date>.jpeg")
