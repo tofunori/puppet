@@ -625,6 +625,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            self?.appActivated(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
+        }
+    }
+
+    // The ChatGPT extension brings the browser to the front when puppet opens a tab, which takes the
+    // keyboard from the app the user is typing in. A browser that comes forward while a session's
+    // browser call runs, without a click from the user, gives the front back. Only during a call, so
+    // the user's own Cmd-Tab to the browser between calls stands.
+    private var lastUserFront: NSRunningApplication?
+
+    private func appActivated(_ app: NSRunningApplication?) {
+        guard let app, app.processIdentifier != getpid() else { return }
+        let isBrowser = browserBundles.contains(app.bundleIdentifier ?? "")
+        guard isBrowser else {
+            lastUserFront = app
+            return
+        }
+        model.refresh()
+        let inBrowser = model.sessions.contains { $0.busy == true && ($0.app == "browser" || browserBundles.contains($0.app ?? "")) }
+        guard inBrowser, !userJustActed(), let previous = lastUserFront, !previous.isTerminated else {
+            if inBrowser {
+                let ago = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .leftMouseDown)
+                logLine("left \(app.localizedName ?? "the browser") in front: the user clicked \(String(format: "%.2f", ago)) s before")
+            }
+            lastUserFront = app
+            return
+        }
+        previous.activate(options: [])
+        logLine("gave the front back to \(previous.localizedName ?? "?") after \(app.localizedName ?? "the browser") came forward")
+    }
+
+    // A click (in the window or the Dock) in the last half second: the user brought that app forward.
+    // Keys do not count: the user is often typing in another app, with Shift, when the browser jumps
+    // forward. Hardware input only: the Computer Use service's own clicks must not count.
+    private func userJustActed() -> Bool {
+        let types: [CGEventType] = [.leftMouseDown, .rightMouseDown]
+        return types.contains { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) < 0.5 }
     }
 
     // Opening the app again shows the icon for 30 s, to reach its menu while Computer Use rests.
