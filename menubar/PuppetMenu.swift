@@ -183,9 +183,15 @@ func latestServiceScreenshot(of target: String) -> NSImage? {
 final class Model: ObservableObject {
     @Published var sessions: [SessionEntry] = []
     @Published var recent: [ActivityLine] = []
-    @Published var preview: NSImage?
-    @Published var previewTarget: String?
+    // One picture per session, so the window can switch sessions or show several at once.
+    @Published var previews: [String: NSImage] = [:]
     @Published var canRecordScreen = true
+    // The session the user chose by clicking its line; nil follows the session acting.
+    @Published var pickedSession: String?
+    // Split between the sessions in a turn instead of showing one; remembered.
+    @Published var split = UserDefaults.standard.bool(forKey: "floatingSplit") {
+        didSet { UserDefaults.standard.set(split, forKey: "floatingSplit") }
+    }
     private var lastLiveAttempt = Date.distantPast
     @Published var floatingEnabled = UserDefaults.standard.object(forKey: "floatingEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(floatingEnabled, forKey: "floatingEnabled") }
@@ -206,23 +212,36 @@ final class Model: ObservableObject {
     // The floating window is pressed: it sinks a little until the click ends.
     @Published var floatingPressed = false
     private var dirs: [URL] = stateDirectories()
-    private var snapshotFiles: [(url: URL, at: String, app: String?)] = []
+    private var snapshotFiles: [String: (url: URL, at: String)] = [:] // by session id
     private var lastDirScan = Date()
     private var lastStamp = ""
     private var lastFullRead = Date.distantPast
-    private var capturing = false
+    private var capturing: Set<String> = []
 
     var busy: Bool { sessions.contains { $0.busy == true } }
     var turnActive: Bool { sessions.contains { $0.turnActive == true } }
     var busySession: SessionEntry? { sessions.first { $0.busy == true } }
 
-    // What to show: the app of the session acting now, else the one of the last action.
-    // The session acting now decides; only with no session acting or in a turn does the last action's
-    // app stand in (an unrelated app from an earlier test showed up during a browser task otherwise).
-    var target: String? {
-        if let busy = busySession { return busy.app }
-        if let turn = sessions.first(where: { $0.turnActive == true }) { return turn.app }
-        return recent.first?.app
+    // The sessions that have driven an app, in a stable order: one line each under the picture.
+    var tracked: [SessionEntry] {
+        sessions.filter { $0.app != nil }.sorted { ($0.name, $0.pid) < ($1.name, $1.pid) }
+    }
+    var activeSessions: [SessionEntry] { tracked.filter { $0.busy == true || $0.turnActive == true } }
+    var splitShown: Bool { split && activeSessions.count > 1 }
+
+    // The session the window shows: the user's pick, else the one acting now, else the one in a
+    // turn, else the one of the last action (an unrelated app from an earlier test showed up during
+    // a browser task when the last action decided first).
+    var shown: SessionEntry? {
+        if let id = pickedSession, let picked = sessions.first(where: { $0.session_id == id }) { return picked }
+        return busySession ?? sessions.first { $0.turnActive == true } ?? sessions.first { $0.session_id == recent.first?.session }
+    }
+    var target: String? { shown?.app ?? recent.first?.app }
+    var preview: NSImage? { shown.flatMap { previews[$0.session_id] } }
+
+    // A click on the line of the session shown goes back to following the one acting.
+    func pick(_ entry: SessionEntry) {
+        pickedSession = pickedSession == entry.session_id ? nil : entry.session_id
     }
 
     func refresh() {
@@ -244,7 +263,7 @@ final class Model: ObservableObject {
         lastFullRead = Date()
         var live: [SessionEntry] = []
         var lines: [ActivityLine] = []
-        var snapshots: [(url: URL, at: String, app: String?)] = []
+        var snapshots: [String: (url: URL, at: String)] = [:]
         let decoder = JSONDecoder()
         for dir in dirs {
             if let data = try? Data(contentsOf: dir.appendingPathComponent("puppet.state.json")),
@@ -253,7 +272,7 @@ final class Model: ObservableObject {
                 live += alive
                 for entry in alive {
                     if let name = entry.snapshot, let at = entry.snapshotAt {
-                        snapshots.append((dir.appendingPathComponent(name), at, entry.app))
+                        snapshots[entry.session_id] = (dir.appendingPathComponent(name), at)
                     }
                 }
             }
@@ -265,42 +284,46 @@ final class Model: ObservableObject {
         }
         sessions = live.sorted { ($0.busy == true ? 0 : $0.turnActive == true ? 1 : 2, $0.name) < ($1.busy == true ? 0 : $1.turnActive == true ? 1 : 2, $1.name) }
         recent = Array(lines.sorted { $0.t > $1.t }.prefix(40))
-        snapshotFiles = snapshots.sorted { $0.at > $1.at }
+        snapshotFiles = snapshots
+        if let id = pickedSession, !live.contains(where: { $0.session_id == id }) { pickedSession = nil }
+        previews = previews.filter { id, _ in live.contains { $0.session_id == id } }
     }
 
-    // Tries the live picture first. When it is not allowed, shows the service's last screenshot and
-    // tries the live picture again every 30 s, so a permission granted later is picked up.
+    // The pictures the window needs: every session in a turn when split, else the one shown.
     func refreshPreview() {
-        guard let target else { return }
+        let wanted = splitShown ? activeSessions : (shown.map { [$0] } ?? [])
+        for entry in wanted { refreshPreview(of: entry) }
+    }
+
+    // Tries the live picture first. When it is not allowed, shows the session's last snapshot and
+    // tries the live picture again every 30 s, so a permission granted later is picked up.
+    private func refreshPreview(of entry: SessionEntry) {
+        guard let target = entry.app else { return }
+        let id = entry.session_id
         // Tabs the agent opens usually stay in the background, so a picture of the browser window
         // would show the user's own tab. For the browser, show the tab snapshots taken after each action.
-        if target == "browser" {
-            showServiceScreenshot(of: target)
+        if target == "browser" || (!canRecordScreen && Date().timeIntervalSince(lastLiveAttempt) < 30) {
+            showSnapshot(of: entry)
             return
         }
-        if !canRecordScreen && Date().timeIntervalSince(lastLiveAttempt) < 30 {
-            showServiceScreenshot(of: target)
-            return
-        }
-        guard !capturing else { return }
-        capturing = true
+        guard !capturing.contains(id) else { return }
+        capturing.insert(id)
         lastLiveAttempt = Date()
         Task {
             let result = await captureWindow(of: target)
             await MainActor.run {
-                self.noteSource(result)
+                self.noteSource(result, target: target)
                 switch result {
                 case .image(let image):
                     self.canRecordScreen = true
-                    self.preview = image
-                    self.previewTarget = target
+                    self.previews[id] = image
                 case .noWindow:
                     self.canRecordScreen = true
                 case .notAllowed:
                     self.canRecordScreen = false
-                    self.showServiceScreenshot(of: target)
+                    self.showSnapshot(of: entry)
                 }
-                self.capturing = false
+                self.capturing.remove(id)
             }
         }
     }
@@ -308,11 +331,11 @@ final class Model: ObservableObject {
     // Logs where the picture comes from each time that changes, to tell a refused permission from a
     // window that is not found.
     private var lastSource = ""
-    private func noteSource(_ result: Capture) {
+    private func noteSource(_ result: Capture, target: String) {
         let source: String
         switch result {
         case .image: source = "live picture"
-        case .noWindow: source = "live picture allowed, but no window of \(target ?? "?") on screen"
+        case .noWindow: source = "live picture allowed, but no window of \(target) on screen"
         case .notAllowed: source = "live picture refused; showing snapshots"
         }
         if source != lastSource {
@@ -321,41 +344,34 @@ final class Model: ObservableObject {
         }
     }
 
-    // Without the live picture: the wrappers' latest snapshot (taken after each action), else the
-    // service's own last screenshot of that app.
-    private var shownSnapshot = ""
-    private func showServiceScreenshot(of target: String) {
-        if let newest = snapshotFiles.first {
-            let key = newest.url.path + newest.at
-            if key != shownSnapshot, let image = NSImage(contentsOf: newest.url) {
-                preview = image
-                previewTarget = newest.app ?? target
-                shownSnapshot = key
+    // Without the live picture: the session's latest snapshot (taken by its wrapper after each
+    // action), else the service's own last screenshot of that app.
+    private var shownSnapshots: [String: String] = [:]
+    private func showSnapshot(of entry: SessionEntry) {
+        let id = entry.session_id
+        if let snapshot = snapshotFiles[id] {
+            let key = snapshot.url.path + snapshot.at
+            if key != shownSnapshots[id], let image = NSImage(contentsOf: snapshot.url) {
+                previews[id] = image
+                shownSnapshots[id] = key
             }
             return
         }
-        if let image = latestServiceScreenshot(of: target) {
-            preview = image
-            previewTarget = target
-        }
+        if let target = entry.app, let image = latestServiceScreenshot(of: target) { previews[id] = image }
     }
 
     // The wrapper ends its turn on SIGUSR2, as when Claude finishes answering (Stop hook).
     func endTurn(_ entry: SessionEntry) { kill(entry.pid, SIGUSR2) }
 
-    // The browser tab of the session the floating window shows.
-    var targetTab: String? {
-        if let busy = busySession { return busy.tab }
-        if let turn = sessions.first(where: { $0.turnActive == true }) { return turn.tab }
-        return sessions.first { $0.session_id == recent.first?.session }?.tab
-    }
-
     // The stop button: SIGUSR1 makes the wrappers in a turn refuse further calls until Claude has
     // answered, so Claude stops instead of only losing its turn.
-    var stopped: Bool { sessions.contains { $0.stopped == true } }
-    var canStop: Bool { !stopped && (busy || turnActive) }
+    // It stops the session shown, or every session in a turn when the window is split.
+    private var stoppable: [SessionEntry] {
+        (splitShown ? activeSessions : (shown.map { [$0] } ?? [])).filter { ($0.busy == true || $0.turnActive == true) && $0.stopped != true }
+    }
+    var canStop: Bool { !stoppable.isEmpty }
     func stop() {
-        for entry in sessions where entry.busy == true || entry.turnActive == true { kill(entry.pid, SIGUSR1) }
+        for entry in stoppable { kill(entry.pid, SIGUSR1) }
     }
 
     // ---------- the line under the picture ----------
@@ -363,14 +379,10 @@ final class Model: ObservableObject {
     enum Phase { case acting, waiting, stopped, done }
 
     var phase: Phase {
-        if stopped && !busy { return .stopped }
-        if busy { return .acting }
-        return turnActive ? .waiting : .done
-    }
-
-    // The session the line is about: the one acting, else the one in a turn, else the last one seen.
-    private var shownSession: String? {
-        busySession?.session_id ?? sessions.first { $0.turnActive == true }?.session_id ?? recent.first?.session
+        guard let shown else { return .done }
+        if shown.stopped == true && shown.busy != true { return .stopped }
+        if shown.busy == true { return .acting }
+        return shown.turnActive == true ? .waiting : .done
     }
 
     // "TextEdit", from an app name, a bundle id or a path to the app.
@@ -382,27 +394,11 @@ final class Model: ObservableObject {
         return target
     }
 
-    var actionLabel: String {
-        switch phase {
-        case .acting: return busySession?.action ?? ""
-        case .waiting: return recent.first { $0.session == shownSession }?.title ?? ""
-        case .stopped: return tr("Stopped", "Arrêté")
-        case .done: return tr("Done", "Terminé")
-        }
-    }
-
-    // The actions of the shown session in its latest run: back from the newest while each came
-    // less than a minute after the one before.
-    var actionCount: Int {
-        let lines = recent.filter { $0.session == shownSession }.compactMap { isoFormatter.date(from: $0.t) }
-        var count = 0
-        var newer: Date?
-        for t in lines {
-            if let newer, newer.timeIntervalSince(t) > 60 { break }
-            count += 1
-            newer = t
-        }
-        return count + (busy ? 1 : 0)
+    // A session's line: blue while it acts, white otherwise; brighter for the session shown.
+    func lineColor(_ entry: SessionEntry) -> Color {
+        let isShown = entry.session_id == shown?.session_id
+        if entry.busy == true { return Color.blue.opacity(isShown ? 1 : 0.5) }
+        return Color.white.opacity(isShown ? 0.85 : 0.2)
     }
 
     func sessionName(for line: ActivityLine) -> String {
@@ -417,12 +413,15 @@ final class Model: ObservableObject {
 // purpose: rounded corners and a hairline edge; the line under it says what puppet does.
 struct PreviewView: View {
     @ObservedObject var model: Model
+    var image: NSImage?
     var width: CGFloat
     var maxHeight: CGFloat
     var radius: CGFloat
+    // Split tiles share one height: the picture then fills it and is cropped.
+    var fixedHeight: CGFloat? = nil
 
     var body: some View {
-        if !model.canRecordScreen && model.preview == nil {
+        if !model.canRecordScreen && image == nil {
             VStack(spacing: 6) {
                 Image(systemName: "rectangle.dashed").font(.system(size: 16, weight: .light)).foregroundStyle(.tertiary)
                 Text(tr("Allow Puppet in Screen Recording, then open it again.", "Autorise Puppet dans Enregistrement de l'écran, puis rouvre l'app."))
@@ -436,13 +435,13 @@ struct PreviewView: View {
             }
             .padding(.horizontal, 24)
             .frame(width: width, height: min(maxHeight, 110))
-        } else if let image = model.preview, image.size.width > 0 {
-            let height = min(maxHeight, width * image.size.height / image.size.width)
+        } else if let image, image.size.width > 0 {
+            let height = fixedHeight ?? min(maxHeight, width * image.size.height / image.size.width)
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(width: width, height: height)
+                .aspectRatio(contentMode: fixedHeight == nil ? .fit : .fill)
+                .frame(width: width, height: height, alignment: .top)
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
         } else {
@@ -453,38 +452,51 @@ struct PreviewView: View {
     }
 }
 
-// One quiet line: a mark for the phase (blue dot while acting), the app, the action, the count.
-// With openHint, a small arrow after the app says a click on the window goes there.
+// One quiet line: the app's name, then a thin line per session (the longer one is the session shown,
+// blue while it acts; a click picks a session) and, with two sessions in a turn, a sign that splits
+// the window between them. With openHint, a small arrow after the app says a click goes there.
 struct CaptionView: View {
     @ObservedObject var model: Model
     var openHint = false
 
     var body: some View {
-        HStack(spacing: 7) {
-            switch model.phase {
-            case .acting:
-                Circle().fill(Color.blue).frame(width: 7, height: 7).shadow(color: .blue.opacity(0.6), radius: 3)
-            case .waiting:
-                Circle().fill(Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
-            case .stopped:
-                RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary).frame(width: 7, height: 7)
-            case .done:
-                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+            if !model.splitShown {
+                Text(model.appLabel).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.white.opacity(0.5)).lineLimit(1)
+                Image(systemName: "arrow.up.right").font(.system(size: 7, weight: .semibold)).foregroundStyle(Color.white.opacity(0.45))
+                    .padding(.leading, -2).opacity(openHint ? 1 : 0)
             }
-            Text(model.appLabel).font(.system(size: 12, weight: .semibold)).lineLimit(1).layoutPriority(1)
-            Image(systemName: "arrow.up.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
-                .padding(.leading, -3).opacity(openHint ? 1 : 0)
-            Text(model.actionLabel).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
-            if model.actionCount > 0 {
-                Text("\(model.actionCount) action\(model.actionCount > 1 ? "s" : "")")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
+            if !model.splitShown {
+                ForEach(model.tracked.count > 1 ? model.tracked : model.shown.map { [$0] } ?? []) { entry in
+                    Button { model.pick(entry) } label: {
+                        Capsule().fill(model.lineColor(entry))
+                            .frame(width: entry.session_id == model.shown?.session_id ? 22 : 12, height: 3)
+                            .padding(.horizontal, 2.5).frame(height: 18).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).help(entry.name).accessibilityLabel(entry.name)
+                }
+            }
+            if model.activeSessions.count > 1 {
+                Button { model.split.toggle() } label: {
+                    HStack(spacing: 2) {
+                        ForEach(0..<2, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 1.5).fill(model.split ? Color.white.opacity(0.9) : Color.clear)
+                                .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder(Color.white.opacity(0.9), lineWidth: 1))
+                                .frame(width: 5, height: 7)
+                        }
+                    }
+                    .padding(.leading, 6).frame(height: 18).contentShape(Rectangle())
+                    .opacity(model.split ? 0.85 : 0.4)
+                }
+                .buttonStyle(.plain)
+                .help(model.split ? tr("One session", "Une seule session") : tr("Split between the active sessions", "Diviser entre les sessions actives"))
             }
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .padding(.top, 7)
         .padding(.bottom, 3)
-        .accessibilityElement(children: .combine)
+        .animation(.easeOut(duration: 0.22), value: model.shown?.session_id)
     }
 }
 
@@ -495,7 +507,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PreviewView(model: model, width: 380, maxHeight: 260, radius: 10)
+            PreviewView(model: model, image: model.preview, width: 380, maxHeight: 260, radius: 10)
             CaptionView(model: model)
         }
         .frame(width: 380)
@@ -515,7 +527,7 @@ struct FloatingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PreviewView(model: model, width: model.floatingWidth, maxHeight: model.floatingWidth * 0.8, radius: 10)
+            pictures
                 .brightness(model.floatingHover ? 0.04 : 0)
                 .overlay(alignment: .topTrailing) {
                     if model.floatingHover && model.canStop {
@@ -524,7 +536,7 @@ struct FloatingView: View {
                 }
             CaptionView(model: model, openHint: model.floatingHover)
         }
-        .frame(width: model.floatingWidth)
+        .frame(width: FloatingView.contentWidth(model))
         .padding(4)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -534,6 +546,33 @@ struct FloatingView: View {
         .padding(12)
         .animation(.easeOut(duration: 0.15), value: model.floatingHover)
         .animation(.easeOut(duration: 0.1), value: model.floatingPressed)
+    }
+
+    // One picture, or one per session in a turn, each with a thin line under it, blue while it acts.
+    @ViewBuilder private var pictures: some View {
+        if model.splitShown {
+            let tile = FloatingView.tileWidth(model)
+            HStack(alignment: .top, spacing: FloatingView.tileGap) {
+                ForEach(model.activeSessions) { entry in
+                    VStack(spacing: 6) {
+                        PreviewView(model: model, image: model.previews[entry.session_id], width: tile, maxHeight: tile * 0.8, radius: 10,
+                                    fixedHeight: tile * 0.68)
+                        Capsule().fill(entry.busy == true ? Color.blue : Color.white.opacity(0.18)).frame(width: tile * 0.4, height: 2)
+                    }
+                    .help(entry.name)
+                }
+            }
+        } else {
+            PreviewView(model: model, image: model.preview, width: model.floatingWidth, maxHeight: model.floatingWidth * 0.8, radius: 10)
+        }
+    }
+
+    // Split, the window grows by half and the sessions share it.
+    static let tileGap: CGFloat = 4
+    static func contentWidth(_ model: Model) -> CGFloat { model.splitShown ? model.floatingWidth * 1.5 : model.floatingWidth }
+    static func tileWidth(_ model: Model) -> CGFloat {
+        let count = CGFloat(max(1, model.activeSessions.count))
+        return (contentWidth(model) - tileGap * (count - 1)) / count
     }
 
     // Where the stop button sits, from the window's top-right corner: the outer margin, the frame's
@@ -571,7 +610,7 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var onStop: () -> Void = {}
     var onHover: (Bool) -> Void = { _ in }
     var onPress: (Bool) -> Void = { _ in }
-    var onOpen: () -> Void = {}
+    var onOpen: (NSPoint) -> Void = { _ in }
     private let edge: CGFloat = 22
 
     override var mouseDownCanMoveWindow: Bool { true }
@@ -602,6 +641,11 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
         else { NSCursor.pointingHand.set() }
     }
 
+    // The right half of the caption, above the outer margin.
+    private var controlsZone: NSRect {
+        NSRect(x: bounds.width / 2, y: 14, width: bounds.width / 2 - 14, height: 32)
+    }
+
     // A slightly larger square than the button, so it is easy to hit.
     private var stopZone: NSRect {
         let size = FloatingView.stopSize + 10
@@ -613,6 +657,11 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
         let p = event.locationInWindow
         if stopShown(), stopZone.contains(p) {
             onStop()
+            return
+        }
+        // The session lines and the split sign are SwiftUI buttons at the right of the caption.
+        if controlsZone.contains(p) {
+            super.mouseDown(with: event)
             return
         }
         guard p.x < edge || p.y < edge else {
@@ -633,6 +682,7 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
         guard let window else { return }
         let start = NSEvent.mouseLocation
         let origin = window.frame.origin
+        let press = window.mouseLocationOutsideOfEventStream
         var moved = false
         onPress(true)
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]), next.type == .leftMouseDragged {
@@ -645,7 +695,7 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
             window.setFrameOrigin(NSPoint(x: origin.x + now.x - start.x, y: origin.y + now.y - start.y))
         }
         onPress(false)
-        if !moved { onOpen() }
+        if !moved { onOpen(press) }
     }
 
     override func resetCursorRects() {
@@ -813,7 +863,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host.onStop = { [weak self] in self?.model.stop() }
             host.onHover = { [weak self] inside in self?.model.floatingHover = inside }
             host.onPress = { [weak self] down in self?.model.floatingPressed = down }
-            host.onOpen = { [weak self] in self?.openDrivenApp() }
+            host.onOpen = { [weak self] point in self?.openSession(at: point) }
             panel.contentView = host
             floatingHost = host
             let size = host.fittingSize
@@ -854,10 +904,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // The picture grows from the floating window to the real window while that app comes to the
     // front, then fades; the floating window fades out and stays hidden while the user is there.
-    private func openDrivenApp() {
-        guard let panel = floating, let target = model.target else { return }
+    // The session under the click: its tile when split, else the session shown.
+    private func openSession(at point: NSPoint) {
+        guard model.splitShown else {
+            if let shown = model.shown { openDrivenApp(shown) }
+            return
+        }
+        let x = point.x - floatingMargin - 4
+        let index = Int(x / (FloatingView.tileWidth(model) + FloatingView.tileGap))
+        let sessions = model.activeSessions
+        if sessions.indices.contains(index) { openDrivenApp(sessions[index]) }
+    }
+
+    private func openDrivenApp(_ entry: SessionEntry) {
+        guard let panel = floating, let target = entry.app else { return }
         // In the browser, select puppet's tab and raise its window first, so the picture lands there.
-        if target == "browser", let tab = model.targetTab { selectTab(tab) }
+        if target == "browser", let tab = entry.tab { selectTab(tab) }
         let found = drivenWindow(for: target)
         guard let app = found?.app ?? runningApp(for: target) else { return }
         openedAt = Date()
@@ -867,7 +929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let start = panel.frame
         hideFloatingWindow()
         app.activate(options: [])
-        guard let frame = found?.frame, let image = model.preview else { return }
+        guard let frame = found?.frame, let image = model.previews[entry.session_id] else { return }
         let captionHeight: CGFloat = 26
         let ghost = NSPanel(contentRect: NSRect(x: start.minX + 16, y: start.minY + 16 + captionHeight,
                                                 width: start.width - 32, height: start.height - 32 - captionHeight),
