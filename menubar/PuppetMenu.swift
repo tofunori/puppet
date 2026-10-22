@@ -32,6 +32,7 @@ struct SessionEntry: Decodable, Identifiable {
     let since: String?
     let snapshot: String?
     let snapshotAt: String?
+    let stopped: Bool?
     var id: Int32 { pid }
 
     var name: String {
@@ -190,6 +191,8 @@ final class Model: ObservableObject {
     @Published var floatingPinned = UserDefaults.standard.bool(forKey: "floatingPinned") {
         didSet { UserDefaults.standard.set(floatingPinned, forKey: "floatingPinned") }
     }
+    // The mouse is over the floating window: its stop button shows.
+    @Published var floatingHover = false
     private var dirs: [URL] = stateDirectories()
     private var snapshotFiles: [(url: URL, at: String, app: String?)] = []
     private var lastDirScan = Date()
@@ -249,7 +252,7 @@ final class Model: ObservableObject {
             }
         }
         sessions = live.sorted { ($0.busy == true ? 0 : $0.turnActive == true ? 1 : 2, $0.name) < ($1.busy == true ? 0 : $1.turnActive == true ? 1 : 2, $1.name) }
-        recent = Array(lines.sorted { $0.t > $1.t }.prefix(12))
+        recent = Array(lines.sorted { $0.t > $1.t }.prefix(40))
         snapshotFiles = snapshots.sorted { $0.at > $1.at }
     }
 
@@ -328,6 +331,61 @@ final class Model: ObservableObject {
     // The wrapper ends its turn on SIGUSR2, as when Claude finishes answering (Stop hook).
     func endTurn(_ entry: SessionEntry) { kill(entry.pid, SIGUSR2) }
 
+    // The stop button: SIGUSR1 makes the wrappers in a turn refuse further calls until Claude has
+    // answered, so Claude stops instead of only losing its turn.
+    var stopped: Bool { sessions.contains { $0.stopped == true } }
+    var canStop: Bool { !stopped && (busy || turnActive) }
+    func stop() {
+        for entry in sessions where entry.busy == true || entry.turnActive == true { kill(entry.pid, SIGUSR1) }
+    }
+
+    // ---------- the line under the picture ----------
+
+    enum Phase { case acting, waiting, stopped, done }
+
+    var phase: Phase {
+        if stopped && !busy { return .stopped }
+        if busy { return .acting }
+        return turnActive ? .waiting : .done
+    }
+
+    // The session the line is about: the one acting, else the one in a turn, else the last one seen.
+    private var shownSession: String? {
+        busySession?.session_id ?? sessions.first { $0.turnActive == true }?.session_id ?? recent.first?.session
+    }
+
+    // "TextEdit", from an app name, a bundle id or a path to the app.
+    var appLabel: String {
+        guard let target else { return "Puppet" }
+        if target == "browser" { return tr("Browser", "Navigateur") }
+        if target.hasPrefix("/") { return URL(fileURLWithPath: target).deletingPathExtension().lastPathComponent }
+        if target.contains("."), !target.contains(" "), let last = target.split(separator: ".").last { return String(last) }
+        return target
+    }
+
+    var actionLabel: String {
+        switch phase {
+        case .acting: return busySession?.action ?? ""
+        case .waiting: return recent.first { $0.session == shownSession }?.title ?? ""
+        case .stopped: return tr("Stopped", "Arrêté")
+        case .done: return tr("Done", "Terminé")
+        }
+    }
+
+    // The actions of the shown session in its latest run: back from the newest while each came
+    // less than a minute after the one before.
+    var actionCount: Int {
+        let lines = recent.filter { $0.session == shownSession }.compactMap { isoFormatter.date(from: $0.t) }
+        var count = 0
+        var newer: Date?
+        for t in lines {
+            if let newer, newer.timeIntervalSince(t) > 60 { break }
+            count += 1
+            newer = t
+        }
+        return count + (busy ? 1 : 0)
+    }
+
     func sessionName(for line: ActivityLine) -> String {
         sessions.first { $0.session_id == line.session }?.name ?? ""
     }
@@ -337,7 +395,7 @@ final class Model: ObservableObject {
 
 // The picture gets an explicit size (the given width, the window's proportions, at most maxHeight):
 // with only maximum sizes, a window sized to fit its content collapsed it to nothing. Kept quiet on
-// purpose: rounded corners, a hairline edge, and a small blue dot while puppet acts.
+// purpose: rounded corners and a hairline edge; the line under it says what puppet does.
 struct PreviewView: View {
     @ObservedObject var model: Model
     var width: CGFloat
@@ -368,11 +426,6 @@ struct PreviewView: View {
                 .frame(width: width, height: height)
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
-                .overlay(alignment: .topTrailing) {
-                    if model.busy {
-                        Circle().fill(Color.blue).frame(width: 7, height: 7).padding(9).shadow(color: .blue.opacity(0.6), radius: 4)
-                    }
-                }
         } else {
             Image(systemName: "rectangle.dashed")
                 .font(.system(size: 22, weight: .light)).foregroundStyle(.tertiary)
@@ -381,30 +434,100 @@ struct PreviewView: View {
     }
 }
 
-// The menu's window: only the picture of the window puppet drives. Settings and "end the turn"
-// are in the icon's right-click menu.
+// One quiet line: a mark for the phase (blue dot while acting), the app, the action, the count.
+struct CaptionView: View {
+    @ObservedObject var model: Model
+
+    var body: some View {
+        HStack(spacing: 7) {
+            switch model.phase {
+            case .acting:
+                Circle().fill(Color.blue).frame(width: 7, height: 7).shadow(color: .blue.opacity(0.6), radius: 3)
+            case .waiting:
+                Circle().fill(Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
+            case .stopped:
+                RoundedRectangle(cornerRadius: 1.5).fill(Color.secondary).frame(width: 7, height: 7)
+            case .done:
+                Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            Text(model.appLabel).font(.system(size: 12, weight: .semibold)).lineLimit(1).layoutPriority(1)
+            Text(model.actionLabel).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 6)
+            if model.actionCount > 0 {
+                Text("\(model.actionCount) action\(model.actionCount > 1 ? "s" : "")")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1).fixedSize()
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 7)
+        .padding(.bottom, 3)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// The menu's window: the picture of the window puppet drives and the line under it. Settings and
+// "end the turn" are in the icon's right-click menu.
 struct ContentView: View {
     @ObservedObject var model: Model
 
     var body: some View {
-        PreviewView(model: model, width: 380, maxHeight: 260, radius: 10)
-            .padding(6)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
-            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-            .padding(12)
+        VStack(spacing: 0) {
+            PreviewView(model: model, width: 380, maxHeight: 260, radius: 10)
+            CaptionView(model: model)
+        }
+        .frame(width: 380)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+        .padding(12)
     }
 }
 
-// The small floating window shown during actions: the same picture, smaller.
+// The small floating window shown during actions: the same picture, smaller, and a stop button
+// that shows only while the mouse is over the window (DraggableHostingView handles its click).
 struct FloatingView: View {
     @ObservedObject var model: Model
 
     var body: some View {
-        PreviewView(model: model, width: model.floatingWidth, maxHeight: model.floatingWidth * 0.8, radius: 12)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-            .padding(12)
+        VStack(spacing: 0) {
+            PreviewView(model: model, width: model.floatingWidth, maxHeight: model.floatingWidth * 0.8, radius: 10)
+                .overlay(alignment: .topTrailing) {
+                    if model.floatingHover && model.canStop {
+                        StopButtonLook().padding(FloatingView.stopInset).transition(.opacity)
+                    }
+                }
+            CaptionView(model: model)
+        }
+        .frame(width: model.floatingWidth)
+        .padding(4)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(Color.white.opacity(model.floatingHover ? 0.14 : 0.08), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+        .padding(12)
+        .animation(.easeOut(duration: 0.15), value: model.floatingHover)
+    }
+
+    // Where the stop button sits, from the window's top-right corner: the outer margin, the frame's
+    // padding, then the inset inside the picture. DraggableHostingView uses the same numbers.
+    static let stopInset: CGFloat = 8
+    static let stopSize: CGFloat = 22
+    static let stopFromCorner: CGFloat = 12 + 4 + stopInset
+}
+
+struct StopButtonLook: View {
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.black.opacity(0.55))
+            Circle().strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 1.5).fill(Color.white.opacity(0.85)).frame(width: 7, height: 7)
+        }
+        .frame(width: FloatingView.stopSize, height: FloatingView.stopSize)
+        .help(tr("Stop", "Arrêter"))
+        .accessibilityElement()
+        .accessibilityLabel(tr("Stop Puppet", "Arrêter Puppet"))
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -414,12 +537,39 @@ struct FloatingView: View {
 final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var currentWidth: () -> CGFloat = { 300 }
     var setWidth: (CGFloat) -> Void = { _ in }
+    // The stop button: whether it shows, and what a click on it does. Puppet never becomes the active
+    // app, so hover is tracked here with an always-active tracking area rather than by SwiftUI.
+    var stopShown: () -> Bool = { false }
+    var onStop: () -> Void = {}
+    var onHover: (Bool) -> Void = { _ in }
     private let edge: CGFloat = 22
 
     override var mouseDownCanMoveWindow: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self && area.userInfo?["puppet"] != nil { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: ["puppet": true]))
+    }
+
+    override func mouseEntered(with event: NSEvent) { onHover(true) }
+    override func mouseExited(with event: NSEvent) { onHover(false) }
+
+    // A slightly larger square than the button, so it is easy to hit.
+    private var stopZone: NSRect {
+        let size = FloatingView.stopSize + 10
+        let corner = FloatingView.stopFromCorner - 5
+        return NSRect(x: bounds.width - corner - size, y: bounds.height - corner - size, width: size, height: size)
+    }
 
     override func mouseDown(with event: NSEvent) {
         let p = event.locationInWindow
+        if stopShown(), stopZone.contains(p) {
+            onStop()
+            return
+        }
         guard p.x < edge || p.y < edge else {
             window?.performDrag(with: event)
             return
@@ -487,9 +637,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A turn lasts until Claude finishes answering (Stop hook) or one idle minute in Claude Desktop.
         if model.busy || model.turnActive { lastActive = Date() }
         updateIcon()
-        // The floating window shows for the whole turn and 10 s after it, or always when pinned.
-        let showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < 10)
-        if showFloating { showFloatingWindow() } else { floating?.orderOut(nil) }
+        // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
+        // or always when pinned.
+        let linger: TimeInterval = model.phase == .stopped ? 2 : 10
+        let showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < linger)
+        if showFloating { showFloatingWindow() } else { hideFloatingWindow() }
         let menuShown = menuPanel?.isVisible == true
         if menuShown { placeMenuPanel() }
         if (menuShown || showFloating) && (model.busy || Date().timeIntervalSince(lastPicture) >= 0.5) {
@@ -542,6 +694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.model.floatingWidth = width
                 self?.showFloatingWindow() // follow at once, not at the next tick
             }
+            host.stopShown = { [weak self] in (self?.model.floatingHover ?? false) && (self?.model.canStop ?? false) }
+            host.onStop = { [weak self] in self?.model.stop() }
+            host.onHover = { [weak self] inside in self?.model.floatingHover = inside }
             panel.contentView = host
             floatingHost = host
             let size = host.fittingSize
@@ -559,7 +714,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let corner = NSPoint(x: panel.frame.maxX, y: panel.frame.maxY)
             panel.setFrame(NSRect(x: corner.x - size.width, y: corner.y - size.height, width: size.width, height: size.height), display: true)
         }
-        if !panel.isVisible { panel.orderFrontRegardless() }
+        if !panel.isVisible || fadingOut {
+            // Fade in; from a fade out under way, back up from where it is.
+            fadingOut = false
+            if !panel.isVisible { panel.alphaValue = 0 }
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.25
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().alphaValue = 1
+            }
+        }
+    }
+
+    private var fadingOut = false
+
+    private func hideFloatingWindow() {
+        guard let panel = floating, panel.isVisible, !fadingOut else { return }
+        fadingOut = true
+        model.floatingHover = false
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            // Shown again during the fade: leave it.
+            guard let self, self.fadingOut else { return }
+            self.fadingOut = false
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+        })
     }
 
     @objc private func togglePopover() {

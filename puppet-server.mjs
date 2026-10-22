@@ -46,6 +46,7 @@ const META_KEY = "x-codex-turn-metadata";
 const NATIVE_PROMPTS = process.platform === "darwin" && process.env.PUPPET_NATIVE_PROMPTS !== "0";
 const PROMPT_RAISE_SECONDS = 10;
 const IDLE_TURN_MS = Number(process.env.PUPPET_IDLE_TURN_MS) || 60 * 1000;
+const STOP_HOLD_MS = Number(process.env.PUPPET_STOP_HOLD_MS) || 60 * 1000;
 const SKY_CLIENT_SUBPATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 // Codex caps a `js` result at 25,000 tokens. About 80,000 characters stays under Claude Code's own
 // 25,000-token limit, so the start of a long result is shown instead of the whole result being
@@ -573,7 +574,39 @@ function answeredBeforeInitialize(line) {
 }
 clientIn.on("close", () => shutdown(0));
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => shutdown(0));
-process.on("SIGUSR2", () => child && endTurnNow());
+process.on("SIGUSR2", () => {
+  clearStop();
+  if (child) endTurnNow();
+});
+process.on("SIGUSR1", () => child && stopFromMenu());
+
+// The stop button: what runs now finishes (the service has no way to cut a call short), nothing
+// starts after it. Claude reads why in the refusal and answers the user.
+let stoppedAt = 0;
+function stopFromMenu() {
+  stoppedAt = Date.now();
+  log("stopped from the menu bar app");
+  updateEntry({ stopped: true });
+  endTurnNow();
+}
+
+function clearStop() {
+  if (!stoppedAt) return;
+  stoppedAt = 0;
+  updateEntry({ stopped: false });
+}
+
+function refuseWhileStopped(m) {
+  if (!stoppedAt || m?.method !== "tools/call" || !("id" in m)) return false;
+  if (Date.now() - stoppedAt > STOP_HOLD_MS) {
+    clearStop();
+    return false;
+  }
+  stoppedAt = Date.now();
+  const text = "[puppet] The user stopped Puppet from its floating window. Do not use the computer again in this answer: say that you stopped, and wait for their next message.";
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text }], isError: true } }) + "\n");
+  return true;
+}
 
 function forwardToServer(line) {
   let msg;
@@ -582,6 +615,7 @@ function forwardToServer(line) {
   } catch {
     return child.stdin.write(line + "\n");
   }
+  if (refuseWhileStopped(msg)) return;
   for (const m of Array.isArray(msg) ? msg : [msg]) {
     if (m?.method === "tools/call") {
       m.params = { ...m.params, _meta: callMeta(m.params?._meta) };

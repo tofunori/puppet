@@ -297,6 +297,23 @@ test("switches to a newer plugin version at the end of a turn", async () => {
   assert.equal(after.version, "2.0");
 });
 
+test("the stop button refuses further calls until Claude finishes answering", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.call("before");
+  s.proc.kill("SIGUSR1");
+  await waitFor(() => ctx.state().some((e) => e.stopped === true));
+  const refused = await s.call("during");
+  assert.equal(refused.result.isError, true);
+  assert.match(refused.result.content[0].text, /stopped Puppet/);
+  assert.ok(!ctx.events().some((e) => e.arguments?.code === "during"), "a refused call must not reach cua_repl");
+  s.proc.kill("SIGUSR2");
+  await waitFor(() => ctx.state().some((e) => e.stopped === false));
+  assert.equal((await s.call("after")).result.content[0].text, "ok");
+  await s.close();
+});
+
 test("refuses to start a server that OpenAI did not sign", { skip: process.platform !== "darwin" }, async () => {
   const ctx = setup();
   const s = connect(ctx, { env: { PUPPET_SKIP_SIGNATURE_CHECK: "0" } });
