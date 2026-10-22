@@ -19,6 +19,11 @@ Claude:  (opens Mail, reads the inbox list)
          Two messages stand out: a security notice from GitHub and ...
 ```
 
+<p align="center">
+  <img src="docs/floating-window.png" alt="Puppet's floating window: a live picture of TextEdit while Claude types a note in it" width="560">
+  <br><sub>The optional floating window shows the app Claude is driving, here TextEdit, with the Computer Use pointer.</sub>
+</p>
+
 ## Features
 
 - **Native apps and browser tabs.** Any Mac app through its accessibility tree (clicks, keys, text, menus), and real tabs in Chrome or another Chromium browser through the ChatGPT extension, with DOM access.

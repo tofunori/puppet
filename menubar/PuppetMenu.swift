@@ -459,6 +459,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         revealUntil = Date().addingTimeInterval(30)
+        // Without the Screen Recording permission, ask macOS once: that also lists the app in
+        // System Settings, where it can be turned on.
+        Task {
+            do { _ = try await SCShareableContent.current } catch { CGRequestScreenCaptureAccess() }
+        }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
     }
