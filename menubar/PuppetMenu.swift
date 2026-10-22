@@ -681,6 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
+        lastUserFront = NSWorkspace.shared.frontmostApplication
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             self?.appActivated(note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)
         }
@@ -705,7 +706,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard inBrowser, !openedByUser, !userJustActed(), let previous = lastUserFront, !previous.isTerminated else {
             if inBrowser {
                 let ago = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .leftMouseDown)
-                logLine("left \(app.localizedName ?? "the browser") in front: the user clicked \(String(format: "%.2f", ago)) s before")
+                let why = openedByUser ? "opened from the floating window" : lastUserFront == nil ? "no app to give the front back to"
+                    : "the user clicked \(String(format: "%.2f", ago)) s before"
+                logLine("left \(app.localizedName ?? "the browser") in front: \(why)")
             }
             lastUserFront = app
             return
