@@ -779,7 +779,9 @@ let snapshotInFlight = false;
 const SNAPSHOT_FILE = path.join(path.dirname(STATE_FILE), `puppet-snapshot-${process.pid}.img`);
 
 async function takeSnapshot() {
-  if (!SNAPSHOTS || !targetBinding || snapshotInFlight || !rpc) return;
+  // A turn that ended as its last call returned (Esc, a reset, the stop button) already has a new
+  // turn id: a snapshot then would open a Computer Use turn nobody ends, and its cursor would stay.
+  if (!SNAPSHOTS || !targetBinding || snapshotInFlight || !rpc || !turnUsed) return;
   snapshotInFlight = true;
   const code = `{ const __cuShot = await ${targetBinding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
   try {
