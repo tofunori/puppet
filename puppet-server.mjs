@@ -223,7 +223,10 @@ function activityEnd(id, msg) {
     fs.appendFileSync(ACTIVITY_FILE, JSON.stringify(line) + "\n");
     if (++appendsSinceTrim >= 50) trimActivity();
   } catch {}
-  updateEntry({ busy: callsInFlight.size > 0, lastAt: line.t, lastOk: ok });
+  // The tab a browser call worked in ("Browser tab: 2036936507, Title: ..."): the menu bar app
+  // selects it when the user clicks the floating window.
+  const tab = call.app === "browser" ? resultTexts(msg).map((t) => /Browser tab: (\d+)/.exec(t)?.[1]).find(Boolean) : null;
+  updateEntry({ busy: callsInFlight.size > 0, lastAt: line.t, lastOk: ok, ...(tab ? { tab } : {}) });
 }
 
 function trimActivity() {

@@ -314,6 +314,15 @@ test("the stop button refuses further calls until Claude finishes answering", as
   await s.close();
 });
 
+test("records the browser tab puppet works in for the menu bar app", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.call('let tab = await cua.createBrowserTab("chrome", "https://example.com");');
+  await waitFor(() => ctx.state().some((e) => e.tab === "2036936507"));
+  await s.close();
+});
+
 test("refuses to start a server that OpenAI did not sign", { skip: process.platform !== "darwin" }, async () => {
   const ctx = setup();
   const s = connect(ctx, { env: { PUPPET_SKIP_SIGNATURE_CHECK: "0" } });

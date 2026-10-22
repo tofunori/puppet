@@ -45,6 +45,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const params = { message: ask[1], requestedSchema: { type: "object", properties: {} }, _meta };
       return process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, method: "elicitation/create", params }) + "\n");
     }
+    if (/createBrowserTab\(/.test(msg.params.arguments?.code ?? "")) {
+      return reply({ content: [{ type: "text", text: 'Browser tab: 2036936507, Title: "Example Domain", URL: "https://example.com/".' }] });
+    }
     const big = /^big:(\d+)$/.exec(msg.params.arguments?.code ?? "");
     if (big) return reply({ content: [{ type: "text", text: "x".repeat(Number(big[1])) }] });
     if (msg.params.arguments?.code === "first") {

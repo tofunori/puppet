@@ -33,6 +33,7 @@ struct SessionEntry: Decodable, Identifiable {
     let snapshot: String?
     let snapshotAt: String?
     let stopped: Bool?
+    let tab: String? // the browser tab a browser call last worked in
     var id: Int32 { pid }
 
     var name: String {
@@ -341,6 +342,13 @@ final class Model: ObservableObject {
 
     // The wrapper ends its turn on SIGUSR2, as when Claude finishes answering (Stop hook).
     func endTurn(_ entry: SessionEntry) { kill(entry.pid, SIGUSR2) }
+
+    // The browser tab of the session the floating window shows.
+    var targetTab: String? {
+        if let busy = busySession { return busy.tab }
+        if let turn = sessions.first(where: { $0.turnActive == true }) { return turn.tab }
+        return sessions.first { $0.session_id == recent.first?.session }?.tab
+    }
 
     // The stop button: SIGUSR1 makes the wrappers in a turn refuse further calls until Claude has
     // answered, so Claude stops instead of only losing its turn.
@@ -845,6 +853,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // front, then fades; the floating window fades out and stays hidden while the user is there.
     private func openDrivenApp() {
         guard let panel = floating, let target = model.target else { return }
+        // In the browser, select puppet's tab and raise its window first, so the picture lands there.
+        if target == "browser", let tab = model.targetTab { selectTab(tab) }
         let found = drivenWindow(for: target)
         guard let app = found?.app ?? runningApp(for: target) else { return }
         openedAt = Date()
@@ -901,6 +911,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return (app, NSRect(x: rect.minX, y: screenHeight - rect.maxY, width: rect.width, height: rect.height))
         }
         return nil
+    }
+
+    // Chromium browsers number their tabs in AppleScript as the extension does: find puppet's tab in
+    // a running browser, make it the active tab and its window the browser's front one. The first
+    // time, macOS asks the user to let Puppet control the browser.
+    private func selectTab(_ tab: String) {
+        guard tab.allSatisfy(\.isNumber) else { return }
+        for app in NSWorkspace.shared.runningApplications {
+            guard let bundle = app.bundleIdentifier, browserBundles.contains(bundle) else { continue }
+            let source = """
+            tell application id "\(bundle)"
+                repeat with w in windows
+                    set i to 0
+                    repeat with t in tabs of w
+                        set i to i + 1
+                        if (id of t as text) is "\(tab)" then
+                            set active tab index of w to i
+                            set index of w to 1
+                            return true
+                        end if
+                    end repeat
+                end repeat
+                return false
+            end tell
+            """
+            var error: NSDictionary?
+            let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
+            if let error { logLine("could not select tab \(tab) in \(bundle): \(error)") }
+            if result?.booleanValue == true { return }
+        }
     }
 
     // No window on screen (minimized, another Space): the app alone, to bring it forward.

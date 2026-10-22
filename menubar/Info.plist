@@ -16,6 +16,8 @@
 	<string>1.0.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Puppet shows the browser tab it works in when you click its floating window.</string>
 	<key>LSUIElement</key>
 	<true/>
 </dict>
