@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "puppet",
+  "version": "1.0.0",
+  "description": "Let Claude use the apps on your Mac through Codex Computer Use (from the ChatGPT macOS app): native apps and real browser tabs, with a Stop hook that ends each turn and the puppet skill",
+  "author": {
+    "name": "Thierry Laurent St-Pierre"
+  },
+  "repository": "https://github.com/tofunori/puppet",
+  "license": "MIT",
+  "skills": [
+    "./skills/"
+  ],
+  "mcpServers": {
+    "puppet": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/puppet-node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/puppet-server.mjs"
+      ]
+    }
+  }
+}

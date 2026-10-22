@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runs node for the puppet plugin: PUPPET_NODE if set, else Homebrew's node, else the first on PATH.
+for candidate in "$PUPPET_NODE" /opt/homebrew/bin/node /usr/local/bin/node; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then exec "$candidate" "$@"; fi
+done
+exec node "$@"

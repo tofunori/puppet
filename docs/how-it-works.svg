@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#71717a"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="760" rx="16" fill="#111113"/>
+
+  <!-- 1. Claude -->
+  <rect x="300" y="40" width="520" height="84" rx="12" fill="#1c1c1f" stroke="#3f3f46"/>
+  <text x="560" y="76" fill="#fafafa" font-size="22" font-weight="600" text-anchor="middle">Claude Code / Claude Desktop</text>
+  <text x="560" y="104" fill="#a1a1aa" font-size="16" text-anchor="middle">calls one MCP tool, js, with JavaScript that uses the cua API</text>
+  <line x1="560" y1="124" x2="560" y2="166" stroke="#71717a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 2. Puppet server -->
+  <rect x="300" y="170" width="520" height="196" rx="12" fill="#fafafa"/>
+  <text x="560" y="206" fill="#0a0a0b" font-size="22" font-weight="700" text-anchor="middle">Puppet server  <tspan font-family="SF Mono, Menlo, monospace" font-size="16" font-weight="400" fill="#52525b">puppet-server.mjs</tspan></text>
+  <g fill="#27272a" font-size="16">
+    <text x="336" y="242">• adds the turn metadata that Computer Use requires</text>
+    <text x="336" y="268">• shows permission prompts as native macOS dialogs</text>
+    <text x="336" y="294">• ends turns: releases tabs, clears the Computer Use pointer</text>
+    <text x="336" y="320">• restarts the runtime after a crash or a plugin update</text>
+    <text x="336" y="346">• cuts huge outputs, adds hints to common errors</text>
+  </g>
+  <line x1="560" y1="366" x2="560" y2="408" stroke="#71717a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 3. cua_repl -->
+  <rect x="300" y="412" width="520" height="84" rx="12" fill="#1c1c1f" stroke="#3f3f46"/>
+  <text x="560" y="448" fill="#fafafa" font-size="22" font-weight="600" text-anchor="middle">cua_repl</text>
+  <text x="560" y="476" fill="#a1a1aa" font-size="16" text-anchor="middle">Codex's Computer Use runtime, from the ChatGPT app (unchanged)</text>
+  <line x1="560" y1="496" x2="560" y2="538" stroke="#71717a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 4. service -->
+  <rect x="300" y="542" width="520" height="70" rx="12" fill="#1c1c1f" stroke="#3f3f46"/>
+  <text x="560" y="572" fill="#fafafa" font-size="22" font-weight="600" text-anchor="middle">Computer Use service</text>
+  <text x="560" y="598" fill="#a1a1aa" font-size="16" text-anchor="middle">signed by OpenAI, with its own macOS permissions</text>
+  <line x1="470" y1="612" x2="380" y2="654" stroke="#71717a" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="650" y1="612" x2="740" y2="654" stroke="#71717a" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- 5. targets -->
+  <rect x="180" y="658" width="380" height="70" rx="12" fill="#1c1c1f" stroke="#3f3f46"/>
+  <text x="370" y="688" fill="#fafafa" font-size="20" font-weight="600" text-anchor="middle">Native apps</text>
+  <text x="370" y="712" fill="#a1a1aa" font-size="15" text-anchor="middle">accessibility tree, clicks, keys, visible pointer</text>
+  <rect x="580" y="658" width="380" height="70" rx="12" fill="#1c1c1f" stroke="#3f3f46"/>
+  <text x="770" y="688" fill="#fafafa" font-size="20" font-weight="600" text-anchor="middle">Browser tabs</text>
+  <text x="770" y="712" fill="#a1a1aa" font-size="15" text-anchor="middle">ChatGPT extension, real tabs, DOM access</text>
+
+  <!-- menu bar app -->
+  <rect x="884" y="216" width="276" height="104" rx="12" fill="none" stroke="#a1a1aa" stroke-dasharray="6 5"/>
+  <text x="1022" y="252" fill="#fafafa" font-size="19" font-weight="600" text-anchor="middle">Puppet menu bar app</text>
+  <text x="1022" y="278" fill="#a1a1aa" font-size="15" text-anchor="middle">optional: live picture of the</text>
+  <text x="1022" y="300" fill="#a1a1aa" font-size="15" text-anchor="middle">app being driven</text>
+  <line x1="820" y1="268" x2="880" y2="268" stroke="#a1a1aa" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+  <text x="850" y="258" fill="#71717a" font-size="12" text-anchor="middle">state</text>
+
+  <!-- stop hook -->
+  <rect x="40" y="170" width="220" height="104" rx="12" fill="none" stroke="#a1a1aa" stroke-dasharray="6 5"/>
+  <text x="150" y="206" fill="#fafafa" font-size="19" font-weight="600" text-anchor="middle">Stop hook</text>
+  <text x="150" y="232" fill="#a1a1aa" font-size="15" text-anchor="middle">ends the turn as soon</text>
+  <text x="150" y="254" fill="#a1a1aa" font-size="15" text-anchor="middle">as Claude stops answering</text>
+  <line x1="260" y1="222" x2="296" y2="222" stroke="#a1a1aa" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+</svg>

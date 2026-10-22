@@ -1,0 +1,8 @@
+puppet.state.json
+puppet-activity.jsonl
+puppet-approvals.json
+puppet-snapshot-*.img*
+*.lock/
+*.tmp
+node_modules/
+.DS_Store

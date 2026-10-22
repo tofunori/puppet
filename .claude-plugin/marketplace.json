@@ -1,0 +1,14 @@
+{
+  "name": "puppet",
+  "description": "Let Claude use the apps on your Mac through Codex Computer Use",
+  "owner": {
+    "name": "Thierry Laurent St-Pierre"
+  },
+  "plugins": [
+    {
+      "name": "puppet",
+      "source": "./",
+      "description": "Let Claude use the apps on your Mac through Codex Computer Use"
+    }
+  ]
+}

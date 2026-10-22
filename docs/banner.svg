@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#141416"/>
+      <stop offset="1" stop-color="#0a0a0b"/>
+    </linearGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#ffffff" fill-opacity="0.06"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="400" fill="url(#bg)"/>
+  <rect width="1280" height="400" fill="url(#dots)"/>
+  <!-- control bar and strings -->
+  <g stroke="#ffffff" stroke-linecap="round">
+    <line x1="168" y1="62" x2="352" y2="62" stroke-width="6"/>
+    <line x1="260" y1="34" x2="260" y2="90" stroke-width="6"/>
+    <line x1="176" y1="62" x2="226" y2="196" stroke-width="1.4" stroke-opacity="0.55"/>
+    <line x1="344" y1="62" x2="300" y2="268" stroke-width="1.4" stroke-opacity="0.55"/>
+    <line x1="260" y1="90" x2="256" y2="304" stroke-width="1.4" stroke-opacity="0.55"/>
+  </g>
+  <!-- pointer -->
+  <path d="M206 150 L206 330 L249 290 L279 352 L307 339 L277 278 L336 278 Z" fill="#ffffff" stroke="#0a0a0b" stroke-width="6" stroke-linejoin="round"/>
+  <!-- title -->
+  <text x="440" y="200" fill="#ffffff" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="108" font-weight="700" letter-spacing="-3">Puppet</text>
+  <text x="444" y="258" fill="#a1a1aa" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="30">Let Claude use the apps on your Mac,</text>
+  <text x="444" y="298" fill="#a1a1aa" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="30">through Codex Computer Use.</text>
+  <text x="444" y="350" fill="#52525b" font-family="SF Mono, Menlo, Consolas, monospace" font-size="20">Claude Code · Claude Desktop · macOS</text>
+</svg>
