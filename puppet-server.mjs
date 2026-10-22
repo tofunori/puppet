@@ -619,6 +619,13 @@ function forwardToServer(line) {
     return child.stdin.write(line + "\n");
   }
   if (refuseWhileStopped(msg)) return;
+  // The first call of a turn, after ChatGPT installed a newer Computer Use: switch to it before the
+  // call, or the call goes to a server whose plugin folder is gone ("native pipe startup failed").
+  if (!turnUsed && !Array.isArray(msg) && msg?.method === "tools/call" && newerPluginInstalled()) {
+    clientQueue.unshift(line);
+    replaceServer("update").catch((e) => log(`update failed: ${e.message}`));
+    return;
+  }
   for (const m of Array.isArray(msg) ? msg : [msg]) {
     if (m?.method === "tools/call") {
       m.params = { ...m.params, _meta: callMeta(m.params?._meta) };
@@ -937,6 +944,14 @@ async function restartServer(reason) {
   }
   ready = true;
   for (const line of clientQueue.splice(0)) forwardToServer(line);
+}
+
+function newerPluginInstalled() {
+  try {
+    return findServerConfig().version !== version;
+  } catch {
+    return false;
+  }
 }
 
 async function replaceServer(reason) {

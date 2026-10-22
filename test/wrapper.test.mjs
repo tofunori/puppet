@@ -323,6 +323,20 @@ test("records the browser tab puppet works in for the menu bar app", async () =>
   await s.close();
 });
 
+test("switches to a newer plugin version before the first call of a turn", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.call("before");
+  s.proc.kill("SIGUSR2");
+  await sleep(300);
+  ctx.addPlugin("2.0");
+  await s.call("after");
+  await s.close();
+  const after = ctx.events().find((e) => e.arguments?.code === "after");
+  assert.equal(after.version, "2.0");
+});
+
 test("refuses to start a server that OpenAI did not sign", { skip: process.platform !== "darwin" }, async () => {
   const ctx = setup();
   const s = connect(ctx, { env: { PUPPET_SKIP_SIGNATURE_CHECK: "0" } });
