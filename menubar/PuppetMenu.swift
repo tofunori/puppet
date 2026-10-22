@@ -200,8 +200,10 @@ final class Model: ObservableObject {
     @Published var floatingPinned = UserDefaults.standard.bool(forKey: "floatingPinned") {
         didSet { UserDefaults.standard.set(floatingPinned, forKey: "floatingPinned") }
     }
-    // The mouse is over the floating window: its stop button shows.
+    // The mouse is over the floating window: its stop button and the "open the app" arrow show.
     @Published var floatingHover = false
+    // The floating window is pressed: it sinks a little until the click ends.
+    @Published var floatingPressed = false
     private var dirs: [URL] = stateDirectories()
     private var snapshotFiles: [(url: URL, at: String, app: String?)] = []
     private var lastDirScan = Date()
@@ -444,8 +446,10 @@ struct PreviewView: View {
 }
 
 // One quiet line: a mark for the phase (blue dot while acting), the app, the action, the count.
+// With openHint, a small arrow after the app says a click on the window goes there.
 struct CaptionView: View {
     @ObservedObject var model: Model
+    var openHint = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -460,6 +464,8 @@ struct CaptionView: View {
                 Image(systemName: "checkmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
             }
             Text(model.appLabel).font(.system(size: 12, weight: .semibold)).lineLimit(1).layoutPriority(1)
+            Image(systemName: "arrow.up.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.leading, -3).opacity(openHint ? 1 : 0)
             Text(model.actionLabel).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 6)
             if model.actionCount > 0 {
@@ -494,28 +500,32 @@ struct ContentView: View {
 }
 
 // The small floating window shown during actions: the same picture, smaller, and a stop button
-// that shows only while the mouse is over the window (DraggableHostingView handles its click).
+// that shows only while the mouse is over the window. A click elsewhere on it goes to the app
+// puppet drives (DraggableHostingView handles both clicks).
 struct FloatingView: View {
     @ObservedObject var model: Model
 
     var body: some View {
         VStack(spacing: 0) {
             PreviewView(model: model, width: model.floatingWidth, maxHeight: model.floatingWidth * 0.8, radius: 10)
+                .brightness(model.floatingHover ? 0.04 : 0)
                 .overlay(alignment: .topTrailing) {
                     if model.floatingHover && model.canStop {
                         StopButtonLook().padding(FloatingView.stopInset).transition(.opacity)
                     }
                 }
-            CaptionView(model: model)
+            CaptionView(model: model, openHint: model.floatingHover)
         }
         .frame(width: model.floatingWidth)
         .padding(4)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(Color.white.opacity(model.floatingHover ? 0.14 : 0.08), lineWidth: 1))
+            .strokeBorder(Color.white.opacity(model.floatingHover ? 0.16 : 0.08), lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+        .scaleEffect(model.floatingPressed ? 0.985 : 1)
         .padding(12)
         .animation(.easeOut(duration: 0.15), value: model.floatingHover)
+        .animation(.easeOut(duration: 0.1), value: model.floatingPressed)
     }
 
     // Where the stop button sits, from the window's top-right corner: the outer margin, the frame's
@@ -541,8 +551,9 @@ struct StopButtonLook: View {
 }
 
 // A hosting view the floating window can be dragged by (borderless windows only move when the view
-// under the mouse says so). A press near the left or bottom edge resizes instead: the window keeps
-// its top-right corner, so pulling left or down makes it bigger.
+// under the mouse says so); a click without a drag opens the app puppet drives. A press near the
+// left or bottom edge resizes instead: the window keeps its top-right corner, so pulling left or
+// down makes it bigger.
 final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var currentWidth: () -> CGFloat = { 300 }
     var setWidth: (CGFloat) -> Void = { _ in }
@@ -551,6 +562,8 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     var stopShown: () -> Bool = { false }
     var onStop: () -> Void = {}
     var onHover: (Bool) -> Void = { _ in }
+    var onPress: (Bool) -> Void = { _ in }
+    var onOpen: () -> Void = {}
     private let edge: CGFloat = 22
 
     override var mouseDownCanMoveWindow: Bool { true }
@@ -559,12 +572,27 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas where area.owner === self && area.userInfo?["puppet"] != nil { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: ["puppet": true]))
     }
 
-    override func mouseEntered(with event: NSEvent) { onHover(true) }
-    override func mouseExited(with event: NSEvent) { onHover(false) }
+    override func mouseEntered(with event: NSEvent) {
+        onHover(true)
+        updateCursor(event)
+    }
+    override func mouseExited(with event: NSEvent) {
+        onHover(false)
+        NSCursor.arrow.set()
+    }
+    override func mouseMoved(with event: NSEvent) { updateCursor(event) }
+
+    // Cursor rects only work in the key window, and this one never is: set the cursor as it moves.
+    private func updateCursor(_ event: NSEvent) {
+        let p = event.locationInWindow
+        if p.x < edge { NSCursor.resizeLeftRight.set() }
+        else if p.y < edge { NSCursor.resizeUpDown.set() }
+        else { NSCursor.pointingHand.set() }
+    }
 
     // A slightly larger square than the button, so it is easy to hit.
     private var stopZone: NSRect {
@@ -580,7 +608,7 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
             return
         }
         guard p.x < edge || p.y < edge else {
-            window?.performDrag(with: event)
+            clickOrDrag()
             return
         }
         let start = NSEvent.mouseLocation
@@ -590,6 +618,26 @@ final class DraggableHostingView<Content: View>: NSHostingView<Content> {
             let grow = max(start.x - now.x, start.y - now.y)
             setWidth(min(1000, max(180, startWidth + grow)))
         }
+    }
+
+    // Moves the window with the mouse once it has gone 3 points; a press that never moves is a click.
+    private func clickOrDrag() {
+        guard let window else { return }
+        let start = NSEvent.mouseLocation
+        let origin = window.frame.origin
+        var moved = false
+        onPress(true)
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]), next.type == .leftMouseDragged {
+            let now = NSEvent.mouseLocation
+            if !moved && hypot(now.x - start.x, now.y - start.y) < 3 { continue }
+            if !moved {
+                moved = true
+                onPress(false)
+            }
+            window.setFrameOrigin(NSPoint(x: origin.x + now.x - start.x, y: origin.y + now.y - start.y))
+        }
+        onPress(false)
+        if !moved { onOpen() }
     }
 
     override func resetCursorRects() {
@@ -645,7 +693,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.refresh()
         let inBrowser = model.sessions.contains { $0.busy == true && ($0.app == "browser" || browserBundles.contains($0.app ?? "")) }
-        guard inBrowser, !userJustActed(), let previous = lastUserFront, !previous.isTerminated else {
+        let openedByUser = Date().timeIntervalSince(openedAt) < 2
+        guard inBrowser, !openedByUser, !userJustActed(), let previous = lastUserFront, !previous.isTerminated else {
             if inBrowser {
                 let ago = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .leftMouseDown)
                 logLine("left \(app.localizedName ?? "the browser") in front: the user clicked \(String(format: "%.2f", ago)) s before")
@@ -687,7 +736,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
         // or always when pinned.
         let linger: TimeInterval = model.phase == .stopped ? 2 : 10
-        let showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < linger)
+        var showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < linger)
+        // Hidden while the user is in the app they opened from it; back when they leave that app.
+        if let pid = hiddenForApp {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid || Date().timeIntervalSince(openedAt) < 1.5 {
+                showFloating = false
+            } else {
+                hiddenForApp = nil
+            }
+        }
         if showFloating { showFloatingWindow() } else { hideFloatingWindow() }
         let menuShown = menuPanel?.isVisible == true
         if menuShown { placeMenuPanel() }
@@ -744,6 +801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host.stopShown = { [weak self] in (self?.model.floatingHover ?? false) && (self?.model.canStop ?? false) }
             host.onStop = { [weak self] in self?.model.stop() }
             host.onHover = { [weak self] inside in self?.model.floatingHover = inside }
+            host.onPress = { [weak self] down in self?.model.floatingPressed = down }
+            host.onOpen = { [weak self] in self?.openDrivenApp() }
             panel.contentView = host
             floatingHost = host
             let size = host.fittingSize
@@ -775,6 +834,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var fadingOut = false
+
+    // ---------- going to the app puppet drives ----------
+
+    private var hiddenForApp: pid_t?
+    private var openedAt = Date.distantPast
+    private var ghost: NSPanel?
+
+    // The picture grows from the floating window to the real window while that app comes to the
+    // front, then fades; the floating window fades out and stays hidden while the user is there.
+    private func openDrivenApp() {
+        guard let panel = floating, let target = model.target else { return }
+        let found = drivenWindow(for: target)
+        guard let app = found?.app ?? runningApp(for: target) else { return }
+        openedAt = Date()
+        hiddenForApp = app.processIdentifier
+        lastUserFront = app
+        model.floatingHover = false
+        let start = panel.frame
+        hideFloatingWindow()
+        app.activate(options: [])
+        guard let frame = found?.frame, let image = model.preview else { return }
+        let captionHeight: CGFloat = 26
+        let ghost = NSPanel(contentRect: NSRect(x: start.minX + 16, y: start.minY + 16 + captionHeight,
+                                                width: start.width - 32, height: start.height - 32 - captionHeight),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        ghost.level = .floating
+        ghost.isOpaque = false
+        ghost.backgroundColor = .clear
+        ghost.hasShadow = true
+        ghost.ignoresMouseEvents = true
+        let view = NSImageView()
+        view.image = image
+        view.imageScaling = .scaleAxesIndependently
+        view.wantsLayer = true
+        view.layer?.cornerRadius = 10
+        view.layer?.masksToBounds = true
+        ghost.contentView = view
+        ghost.orderFrontRegardless()
+        self.ghost = ghost
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.34
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+            ghost.animator().setFrame(frame, display: true)
+        }, completionHandler: { [weak self] in
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.15
+                ghost.animator().alphaValue = 0
+            }, completionHandler: {
+                ghost.orderOut(nil)
+                if self?.ghost === ghost { self?.ghost = nil }
+            })
+        })
+    }
+
+    // The app's frontmost normal window on screen (window list order is front to back), in Cocoa
+    // screen coordinates.
+    private func drivenWindow(for target: String) -> (app: NSRunningApplication, frame: NSRect)? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let screenHeight = NSScreen.screens.first?.frame.height ?? 0
+        for info in list where (info[kCGWindowLayer as String] as? Int) == 0 {
+            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  let app = NSRunningApplication(processIdentifier: pid), matches(app, target),
+                  let bounds = info[kCGWindowBounds as String], let rect = CGRect(dictionaryRepresentation: bounds as! CFDictionary),
+                  rect.width > 200, rect.height > 120 else { continue }
+            return (app, NSRect(x: rect.minX, y: screenHeight - rect.maxY, width: rect.width, height: rect.height))
+        }
+        return nil
+    }
+
+    // No window on screen (minimized, another Space): the app alone, to bring it forward.
+    private func runningApp(for target: String) -> NSRunningApplication? {
+        NSWorkspace.shared.runningApplications.first { matches($0, target) }
+    }
+
+    private func matches(_ app: NSRunningApplication, _ target: String) -> Bool {
+        if target == "browser" { return browserBundles.contains(app.bundleIdentifier ?? "") }
+        if target.hasPrefix("/") { return app.bundleURL?.path == target }
+        return app.localizedName?.caseInsensitiveCompare(target) == .orderedSame
+            || app.bundleIdentifier?.caseInsensitiveCompare(target) == .orderedSame
+    }
 
     private func hideFloatingWindow() {
         guard let panel = floating, panel.isVisible, !fadingOut else { return }
