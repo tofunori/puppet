@@ -9,7 +9,7 @@ The `puppet` MCP server exposes two tools: `mcp__puppet__js` (every action, writ
 
 ## Getting started
 
-- The first `js` call of a session (or after a reset) holds **a single** API call, for example `let app = await cua.getApp("TextEdit");`. Its result carries the full `cua` documentation and the confirmation policy: read them before going on.
+- The first `js` call of a session (or after a reset) holds **a single** API call, for example `let app = await cua.getApp("TextEdit");` (the localized name from `getState()`, such as `"Calculatrice"`, works too). Its result carries the full `cua` documentation and the confirmation policy: read them before going on.
 - Declare bindings with `let`, not `const`: kernel state persists from one call to the next, and `const` blocks redeclaring.
 - If a call answers "X is not defined" and prints the documentation again, the kernel was reset (Claude Desktop restarted, a `js` call ran past its timeout, or `js_reset`). Repeat `getApp` alone in one call.
 
@@ -27,15 +27,20 @@ The `puppet` MCP server exposes two tools: `mcp__puppet__js` (every action, writ
   - `await cuFind(app, /Save|Export/)`: the matching lines of the accessibility tree, without printing the rest (30 at most);
   - `cuLines(text, pattern, max)`: the same on text you already have;
   - `cuKey("cmd+shift+n")`: translates key names for `pressKey` (here `super+shift+n`).
-  Do not redeclare these names.
-- Group the actions and the final observation in one `js` call. Take a screenshot (`await app.getScreenshot()`) only when the tree is not enough.
+  The server also declares `cuQuery(target, selector)` (the elements a selector matches, without acting) and Puppet's additions to apps and tabs. Do not redeclare these names.
+- Group the actions and the final observation in one `js` call. Take a screenshot (`await app.getScreenshot()`) only when the tree is not enough. It already shows the image: never pass it to `nodeRepl.emitImage` too.
+- The first call of a kernel prints `## Puppet additions` after Codex's documentation: selectors, stale indices, `typeText`, `tab.goto`, waits, `tab.extractLinks`, with one example each.
 
 ## Act without breaking anything
 
 - Never type into a document that is already open. Open a new one (`await app.pressKey("super+n")`) and work in the "Untitled" window.
-- On macOS, `typeText(text, index)` does not work (the index is Linux only): click the field first (`await app.click(index)`), then `await app.typeText(text)`.
+- Target elements by selector rather than by index: `click({ id: "Seven" })`, `click({ text: "Rechercher", role: "button" })`, `typeText({ role: "text field" }, "…", { submit: true })`. Indices change whenever the interface changes; a stale index now fails with `[puppet] Stale element index …` instead of clicking another element. Then read again with `getAXState({ full: true })` (a plain `getAXState()` is only a diff).
+- `typeText` differs: `typeText(text)` in an app, `typeText(index | null, text)` in a tab (`typeText(text)` also works there now). With a target, Puppet focuses it, types and checks that the field shows the text.
+- Wait with `waitFor({ text } | { role, name } | { urlIncludes }, { timeout })` or `waitForIdle()`, not with a fixed `setTimeout`.
+- A click at coordinates returns what it hit (`hit` in a tab, `changes` in an app): check it before going on.
 - To show the user what happens, bring the window to the front: `await app.performSecondaryAction(0, "Raise")`.
-- In a browser, prefer a new tab over the current one, unless the user asks to continue there.
+- In a browser, prefer a new tab over the current one, unless the user asks to continue there. Then stay in it: `tab.goto(url, { waitUntil: "load" })`, `tab.back()`, `tab.reload()`, rather than one more `createBrowserTab`.
+- For lists of products or results, `await tab.extractLinks({ match: /\$/ })` returns clean `{ text, href }` with full URLs; the tree cuts URLs with `…` (`getAXState({ fullUrls: true })` restores them).
 - Check the result in the returned state (field value, window title, URL) before saying it is done.
 
 ## Browsers

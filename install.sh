@@ -131,6 +131,7 @@ fi
 mkdir -p "$INSTALL_DIR"
 cp "$REPO_DIR/puppet-server.mjs" "$WRAPPER"
 cp "$REPO_DIR/puppet-end-turn.mjs" "$END_TURN"
+cp "$REPO_DIR/puppet-kernel.js" "$REPO_DIR/puppet-kernel.md" "$INSTALL_DIR/"
 chmod +x "$WRAPPER" "$END_TURN"
 ok "Wrapper copied to $WRAPPER"
 

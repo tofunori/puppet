@@ -83,6 +83,11 @@ const installed = path.join(MCP_DIR, "puppet-server.mjs");
 if (!fs.existsSync(installed)) fail(`wrapper not installed at ${installed}`, "Run ./install.sh");
 else if (sha(installed) !== sha(path.join(REPO, "puppet-server.mjs"))) warn("installed wrapper differs from this checkout", "Run ./install.sh to install this version.");
 else ok("installed wrapper matches this checkout");
+for (const f of ["puppet-kernel.js", "puppet-kernel.md"]) {
+  const file = path.join(MCP_DIR, f);
+  if (!fs.existsSync(file)) warn(`${f} not installed: the cua additions (selectors, stale-index checks, tab.goto…) are off`, "Run ./install.sh");
+  else if (sha(file) !== sha(path.join(REPO, f))) warn(`installed ${f} differs from this checkout`, "Run ./install.sh to install this version.");
+}
 if (fs.existsSync(path.join(MCP_DIR, "puppet-end-turn.mjs"))) ok("Stop hook script installed");
 else fail("Stop hook script missing", "Run ./install.sh");
 try {

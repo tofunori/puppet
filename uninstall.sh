@@ -6,7 +6,7 @@ INSTALL_DIR="$HOME/.claude/mcp"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 
 claude mcp remove puppet -s user >/dev/null 2>&1 && echo "Removed MCP server 'puppet'" || echo "MCP server 'puppet' was not registered"
-rm -f "$INSTALL_DIR/puppet-server.mjs" "$INSTALL_DIR/puppet-end-turn.mjs" "$INSTALL_DIR/puppet.state.json" "$INSTALL_DIR/puppet-approvals.json" "$INSTALL_DIR/puppet-activity.jsonl"
+rm -f "$INSTALL_DIR/puppet-server.mjs" "$INSTALL_DIR/puppet-end-turn.mjs" "$INSTALL_DIR/puppet-kernel.js" "$INSTALL_DIR/puppet-kernel.md" "$INSTALL_DIR/puppet.state.json" "$INSTALL_DIR/puppet-approvals.json" "$INSTALL_DIR/puppet-activity.jsonl"
 echo "Removed wrapper files from $INSTALL_DIR"
 pkill -x puppet-menu 2>/dev/null || true
 rm -rf "$HOME/Applications/Puppet.app" "$HOME/Applications/codex-cu Menu.app"
