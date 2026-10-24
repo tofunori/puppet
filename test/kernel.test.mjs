@@ -125,6 +125,19 @@ test("acceptance 6: a stale index fails with the explicit message instead of cli
   assert.deepEqual(calc.clicks, ["Seven"], "nothing else was clicked");
 });
 
+test("two stale indices from the same old read both fail; the first check does not refresh the second", async () => {
+  const { app, calc } = calculator();
+  const k = kernel({});
+  k.cuDecorate(app);
+  calc.display = "98";
+  const tree = k.cuParse(await app.getAXState({ full: true }));
+  const idx = (id) => tree.find((e) => e.fields.ID === id).index;
+  await app.click({ id: "AllClear" }); // the display goes back to 0: everything below moves up by one
+  await rejectsWith(app.click(idx("Seven")), /^\[puppet\] Stale element index \d+:/);
+  await rejectsWith(app.click(idx("Six")), /^\[puppet\] Stale element index \d+:/);
+  assert.deepEqual(calc.clicks, ["AllClear"], "nothing else was clicked");
+});
+
 test("the service's -10005 becomes the same explicit message", async () => {
   const { app } = calculator();
   const k = kernel({});

@@ -175,11 +175,21 @@ const __cuNote = (target, text, full) => {
 };
 
 // A full tree, read without printing it. Reading alone does not renumber elements; the interface
-// changing does.
-const __cuRead = async (target) => {
+// changing does. Indices are checked against the tree the caller last saw (getAXState, getApp), so
+// a read of Puppet's own (to check, resolve or wait) counts the snapshot but keeps that tree, unless
+// `remember` (the caller saw it too). Otherwise the check of one stale index replaced the tree, and
+// a second stale index from the same old read passed and clicked another element.
+const __cuRead = async (target, remember = false) => {
   const text = await target[__cuOrig].getAXState({ emit: false, disableDiffing: true });
-  const elements = __cuNote(target, text, true);
-  return { text, elements, focused: __cuState.get(target).focused };
+  if (remember) {
+    const elements = __cuNote(target, text, true);
+    return { text, elements, focused: __cuState.get(target).focused };
+  }
+  const s = __cuState.get(target) ?? { n: 0, elements: new Map(), focused: null };
+  s.n += 1;
+  __cuState.set(target, s);
+  const focus = /The focused UI element is (\d+)/.exec(String(text));
+  return { text, elements: cuParse(text), focused: focus ? Number(focus[1]) : null };
 };
 
 const __cuIsTab = (t) => typeof t?.goto === "function" || (t?.playwright != null && typeof t.playwright === "object");
@@ -635,7 +645,7 @@ const __cuWrapCua = () => {
     const seed = async (app) => {
       cuDecorate(app);
       try {
-        if (app?.[__cuOrig]) await __cuRead(app);
+        if (app?.[__cuOrig]) await __cuRead(app, true);
       } catch {}
       return app;
     };
@@ -685,7 +695,7 @@ const cuAdopt = async (input) => {
   const target = cuDecorate(input);
   if (target?.[__cuOrig] && !__cuIsTab(target) && !__cuState.has(target)) {
     try {
-      await __cuRead(target);
+      await __cuRead(target, true);
     } catch {}
   }
   return target;
