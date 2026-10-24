@@ -197,9 +197,12 @@ const __cuWait = (ms) => new Promise((r) => setTimeout(r, ms));
 const __cuRoleGroups = { click: ["button", "link", "checkbox", "radio button", "menu item", "tab"], type: ["text field"] };
 
 // The element a selector names in a fresh tree. With no match yet, it reads again until
-// `timeout` (a panel may still be opening). With several equally good matches it prefers the
-// focused one, then buttons and links (to click) or text fields (to type); otherwise it fails and
-// lists them, so the caller can add a role, an id or { nth }.
+// `timeout` (a panel may still be opening). To type, when the tree reports a focus that is not one
+// of the matches, it also reads again until the focus lands on one: a search field opened by a
+// click shows up and takes the focus a moment later, and the only text field until then may be
+// another one (a newsletter form). With several equally good matches it prefers the focused one,
+// then buttons and links (to click) or text fields (to type); otherwise it fails and lists them,
+// so the caller can add a role, an id or { nth }.
 const cuResolve = async (target, selector, purpose = "click") => {
   if (Number.isInteger(selector)) return { index: selector, element: __cuState.get(target)?.elements.get(selector) ?? null };
   if (selector && typeof selector === "object" && Number.isInteger(selector.index)) return { index: selector.index, element: null };
@@ -210,7 +213,8 @@ const cuResolve = async (target, selector, purpose = "click") => {
   for (;;) {
     read = await __cuRead(target);
     found = cuMatch(read.elements, selector);
-    if (found.length || Date.now() >= deadline) break;
+    const focusElsewhere = purpose === "type" && read.focused != null && !found.some((e) => e.index === read.focused);
+    if ((found.length && !focusElsewhere) || Date.now() >= deadline) break;
     await __cuWait(300);
   }
   const nth = typeof selector === "object" ? selector.nth : undefined;

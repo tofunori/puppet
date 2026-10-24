@@ -229,7 +229,9 @@ function searchTab() {
       return tree();
     },
     async click(target) {
-      if (target === 24) page.opening = 2;
+      // The search field shows up and takes the focus a few reads later, after the tree has looked
+      // settled: until then the button keeps the focus and the newsletter field is the only one.
+      if (target === 24) Object.assign(page, { opening: 4, focus: 24 });
       if (target === 417 || target === 478) page.focus = target;
     },
     async typeText(index, text) {
