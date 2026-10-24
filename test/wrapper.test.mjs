@@ -249,6 +249,18 @@ test("adds Puppet's documentation after the docs of a new kernel, and its additi
   await s.close();
 });
 
+test("a first call that fails still loads Puppet's additions in the kernel", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  const first = await s.call("let app = await cua.getApp(\"Calculatrice\"); failfirst");
+  assert.equal(first.result.isError, true);
+  assert.ok(first.result.content.some((c) => /^## Puppet additions/.test(c.text ?? "")));
+  const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
+  assert.match(helpers.arguments.code, /const cuDecorate = /);
+  await s.close();
+});
+
 test("keeps one of identical images in a result", async () => {
   const ctx = setup();
   const s = connect(ctx);

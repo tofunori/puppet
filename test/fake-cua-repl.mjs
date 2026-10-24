@@ -3,6 +3,7 @@
 // arrives before `initialize`. Every event is appended to $FAKE_LOG as one JSON line.
 // `js` with code "crash" makes it exit, "esc" answers as the service does after the user pressed
 // Esc, "first" (alone or after other statements) answers like the first call of a new kernel,
+// "failfirst" fails as a first call does (with the docs of a new kernel),
 // "twoshots" answers the same image twice, "nowindow" fails as getApp does for an app
 // with no window (with the docs of a new kernel), "invalid" fails as getApp does for an
 // unknown app, "big:N" answers N characters, "ask:<message>" sends a Computer Use app prompt with
@@ -63,6 +64,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const content = [
         { type: "text", text: "Computer Use server error -10005: cgWindowNotFound" },
         { type: "text", text: "## Computer Use\n\nGrant Accessibility and Screen Recording first." },
+      ];
+      return reply({ content, isError: true });
+    }
+    if (/(^|; )failfirst$/.test(msg.params.arguments?.code ?? "")) {
+      // A first call that fails still prints the documentation of the new kernel.
+      const content = [
+        { type: "text", text: "Invalid app: Calculatrice" },
+        { type: "text", text: "## Computer Use\n\n(documentation of a new kernel)" },
       ];
       return reply({ content, isError: true });
     }

@@ -819,10 +819,10 @@ function callMeta(clientMeta = {}) {
   return { ...clientMeta, ...sandbox, [META_KEY]: turnMeta(SESSION_ID, turnId) };
 }
 
-// cua_repl prints its documentation on the first call of a new kernel; a failed first call leaves
-// the kernel untouched, so only a successful one counts.
+// cua_repl prints its documentation once, on the first call of a new kernel, even when that call
+// fails (`getApp("Calculatrice")` → "Invalid app"); the kernel stays, so a failed first call counts.
 function freshKernel(msg) {
-  return HELPERS && msg.result && !msg.result.isError && resultTexts(msg).some((t) => t.startsWith("## Computer Use"));
+  return HELPERS && msg.result && resultTexts(msg).some((t) => t.startsWith("## Computer Use"));
 }
 
 // The variable the model last bound an app or tab to (`let app = await cua.getApp(...)`). Bindings
