@@ -737,10 +737,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // The ChatGPT extension brings the browser to the front when puppet opens a tab, which takes the
-    // keyboard from the app the user is typing in. A browser that comes forward while a session's
-    // browser call runs, without a click from the user, gives the front back. Only during a call, so
-    // the user's own Cmd-Tab to the browser between calls stands.
+    // The ChatGPT extension brings the browser to the front when puppet opens, closes or releases a
+    // tab, which takes the keyboard from the app the user is typing in. A browser that comes forward
+    // during a browser session's turn, or up to 5 s after it, without the user bringing it forward,
+    // gives the front back. During a call only a click counts as the user's; between calls a
+    // Cmd-Tab counts too.
     private var lastUserFront: NSRunningApplication?
 
     private func appActivated(_ app: NSRunningApplication?) {
@@ -751,9 +752,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         model.refresh()
-        let inBrowser = model.sessions.contains { $0.busy == true && ($0.app == "browser" || browserBundles.contains($0.app ?? "")) }
+        let browserSessions = model.sessions.filter { $0.app == "browser" || browserBundles.contains($0.app ?? "") }
+        let acting = browserSessions.contains { $0.busy == true }
+        let inBrowser = acting || browserSessions.contains { $0.turnActive == true }
+            || (!browserSessions.isEmpty && Date().timeIntervalSince(lastActive) < 5)
         let openedByUser = Date().timeIntervalSince(openedAt) < 2
-        guard inBrowser, !openedByUser, !userJustActed(), let previous = lastUserFront, !previous.isTerminated else {
+        guard inBrowser, !openedByUser, !userJustActed(keys: !acting), let previous = lastUserFront, !previous.isTerminated else {
             if inBrowser {
                 let ago = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .leftMouseDown)
                 let why = openedByUser ? "opened from the floating window" : lastUserFront == nil ? "no app to give the front back to"
@@ -768,11 +772,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // A click (in the window or the Dock) in the last half second: the user brought that app forward.
-    // Keys do not count: the user is often typing in another app, with Shift, when the browser jumps
-    // forward. Hardware input only: the Computer Use service's own clicks must not count.
-    private func userJustActed() -> Bool {
+    // With `keys`, a Cmd-Tab too: the release of Command, which switches apps, in the last 0.3 s.
+    // Typed keys never count: the user is often typing in another app, with Shift, when the browser
+    // jumps forward. Hardware input only: the Computer Use service's own clicks must not count.
+    private func userJustActed(keys: Bool = false) -> Bool {
         let types: [CGEventType] = [.leftMouseDown, .rightMouseDown]
-        return types.contains { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) < 0.5 }
+        if types.contains(where: { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) < 0.5 }) { return true }
+        guard keys else { return false }
+        let commandUp = !CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
+        return commandUp && CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .flagsChanged) < 0.3
+            && CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown) < 1.5
     }
 
     // Opening the app again shows the icon for 30 s, to reach its menu while Computer Use rests.
@@ -795,9 +804,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.busy || model.turnActive { lastActive = Date() }
         updateIcon()
         // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
-        // or always when pinned.
-        let linger: TimeInterval = model.phase == .stopped ? 2 : 10
-        var showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < linger)
+        // or always when pinned. Without a picture to show (the tab was closed), it shows only while
+        // puppet acts: an empty frame between actions or after the turn says nothing.
+        let empty = model.preview == nil && !model.splitShown
+        let linger: TimeInterval = model.phase == .stopped ? 2 : empty ? 0 : 10
+        let inTurn = model.busy || (model.turnActive && !empty)
+        var showFloating = model.floatingPinned || (model.floatingEnabled && (inTurn || Date().timeIntervalSince(lastActive) < linger))
         // Hidden while the user is in the app they opened from it; back when they leave that app.
         if let pid = hiddenForApp {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid || Date().timeIntervalSince(openedAt) < 1.5 {
@@ -809,7 +821,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if showFloating { showFloatingWindow() } else { hideFloatingWindow() }
         let menuShown = menuPanel?.isVisible == true
         if menuShown { placeMenuPanel() }
-        if (menuShown || showFloating) && (model.busy || Date().timeIntervalSince(lastPicture) >= 0.5) {
+        // Also in a turn while hidden, so a picture that arrives brings the window back.
+        if (menuShown || showFloating || model.turnActive) && (model.busy || Date().timeIntervalSince(lastPicture) >= 0.5) {
             model.refreshPreview()
             lastPicture = Date()
         }
