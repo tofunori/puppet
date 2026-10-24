@@ -243,7 +243,7 @@ test("adds Puppet's documentation after the docs of a new kernel, and its additi
   assert.match(texts[1], /^## Puppet additions/);
   const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
   assert.match(helpers.arguments.code, /const cuDecorate = /);
-  assert.match(helpers.arguments.code, /try \{ await cuAdopt\(app\); \} catch \{\}/, "the app bound by the first call is decorated");
+  assert.match(helpers.arguments.code, /try \{ app = await cuAdopt\(app\); \} catch \{\}/, "the app bound by the first call is decorated");
   const later = await s.call("later");
   assert.equal(later.result.content.length, 1, "the documentation comes once");
   await s.close();

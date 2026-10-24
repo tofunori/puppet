@@ -284,11 +284,16 @@ const __cuStale = async (target, error, index) => {
 
 // ---------- decorating apps and tabs ----------
 
-const cuDecorate = (target) => {
-  if (!target || typeof target !== "object" || target[__cuOrig] || typeof target.click !== "function") return target;
+// Returns the decorated object: the app itself, or for a tab a new object that inherits from it.
+// A tab reaches the kernel through cua_repl's membrane, which ignores an assignment to one of the
+// tab's own methods (tab.click = … leaves the original in place), while a new object can override
+// them and still reads everything else from the tab.
+const cuDecorate = (input) => {
+  if (!input || typeof input !== "object" || input[__cuOrig] || typeof input.click !== "function") return input;
+  const target = __cuIsTab(input) ? Object.create(input) : input;
   const orig = {};
   for (const k of ["getAXState", "click", "typeText", "setValue", "pressKey", "selectText", "performSecondaryAction", "goto"]) {
-    if (typeof target[k] === "function") orig[k] = target[k].bind(target);
+    if (typeof input[k] === "function") orig[k] = input[k].bind(input);
   }
   Object.defineProperty(target, __cuOrig, { value: orig, enumerable: false });
   const tab = __cuIsTab(target);
@@ -673,10 +678,11 @@ const __cuWrapCua = () => {
 };
 __cuWrapCua();
 
-// An app or tab bound before this file was loaded (the first call of a kernel): decorated in place,
-// and an app's tree read once so that actions by index can be checked.
-const cuAdopt = async (target) => {
-  cuDecorate(target);
+// An app or tab bound before this file was loaded (the first call of a kernel), decorated: an app
+// in place, with its tree read once so that actions by index can be checked; a tab as the new
+// object cuDecorate returns, which the server assigns back to the variable.
+const cuAdopt = async (input) => {
+  const target = cuDecorate(input);
   if (target?.[__cuOrig] && !__cuIsTab(target) && !__cuState.has(target)) {
     try {
       await __cuRead(target);

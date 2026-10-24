@@ -235,13 +235,22 @@ function searchTab() {
       if (key === "Enter" && page.value) page.url = `https://www.simons.ca/fr/recherche--search?query=${encodeURIComponent(page.value)}`;
     },
   };
-  return { tab, page };
+  // Like the tab cua_repl hands the kernel: its membrane ignores an assignment to an own method.
+  const membrane = new Proxy(tab, {
+    set(obj, key, value, receiver) {
+      if (receiver !== membrane) return Reflect.defineProperty(receiver, key, { value, writable: true, enumerable: true, configurable: true });
+      if (typeof obj[key] === "function" && Object.hasOwn(obj, key)) return true;
+      obj[key] = value;
+      return true;
+    },
+  });
+  return { tab: membrane, page };
 }
 
 test("acceptance 2: search with selectors, typeText checks its work and submits", async () => {
-  const { tab, page } = searchTab();
+  let { tab, page } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   const clicked = await tab.click({ text: "Rechercher" });
   assert.equal(clicked.clicked, 24, "the button, not the container");
   const typed = await tab.typeText({ role: "text field" }, "chandail laine homme", { submit: true });
@@ -251,9 +260,9 @@ test("acceptance 2: search with selectors, typeText checks its work and submits"
 });
 
 test("typeText(text) alone types at the focus in a tab; typeText(index, text) still works", async () => {
-  const { tab, page } = searchTab();
+  let { tab, page } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   page.open = true;
   page.focus = 417;
   await tab.typeText("abc");
@@ -263,24 +272,24 @@ test("typeText(text) alone types at the focus in a tab; typeText(index, text) st
 });
 
 test("a stale tab index gets the explicit message", async () => {
-  const { tab } = searchTab();
+  let { tab } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   await rejectsWith(tab.setValue(300, "x"), /^\[puppet\] Stale element index 300:/);
 });
 
 test("acceptance 3: goto stays in the same tab", async () => {
-  const { tab } = searchTab();
+  let { tab } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   const url = "https://www.simons.ca/fr/recherche--search?query=pantalon%20homme%20laine";
   assert.deepEqual(plain(await tab.goto(url, { waitUntil: "load" })), { url });
 });
 
 test("acceptance 4: extractLinks returns clean text and full URLs, one per URL", async () => {
-  const { tab } = searchTab();
+  let { tab } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   const links = await tab.extractLinks({ match: /\$ CAN/ });
   assert.deepEqual(plain(links), [
     { text: "Chandail en laine 89,00 $ CAN", href: "https://www.simons.ca/fr/p/chandail-1" },
@@ -289,27 +298,27 @@ test("acceptance 4: extractLinks returns clean text and full URLs, one per URL",
 });
 
 test("getAXState({ fullUrls: true }) restores URLs cut with an ellipsis", async () => {
-  const { tab } = searchTab();
+  let { tab } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   const text = await tab.getAXState({ fullUrls: true });
   assert.match(text, /Value: https:\/\/www\.simons\.ca\/fr\/vetements-femme\/les-incontournables-contemporains--1234/);
   assert.equal(k.written.length, 1, "printed once");
 });
 
 test("a click at coordinates says what it hit", async () => {
-  const { tab } = searchTab();
+  let { tab } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   const r = await tab.click([100, 200]);
   assert.deepEqual(plain(r.clicked), [100, 200]);
   assert.equal(r.hit.text, "Derniers produits vus");
 });
 
 test("waitFor polls until the condition holds or times out", async () => {
-  const { tab, page } = searchTab();
+  let { tab, page } = searchTab();
   const k = kernel({});
-  k.cuDecorate(tab);
+  tab = k.cuDecorate(tab);
   setTimeout(() => (page.url = "https://www.simons.ca/fr/recherche--search?query=x"), 300);
   assert.deepEqual(plain(await tab.waitFor({ urlIncludes: "recherche" }, { timeout: 3000, interval: 100 })), { url: page.url });
   await rejectsWith(tab.waitFor({ text: "Nulle part" }, { timeout: 200, interval: 50 }), /waitFor .* timed out after 200 ms/);

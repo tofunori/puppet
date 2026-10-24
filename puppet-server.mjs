@@ -857,7 +857,8 @@ async function takeSnapshot() {
 }
 
 async function loadHelpers() {
-  const adopt = [...kernelBindings].map((name) => `try { await cuAdopt(${name}); } catch {}`).join("\n");
+  // A tab is decorated as a new object, so the variable is assigned again (a const one stays as it was).
+  const adopt = [...kernelBindings].map((name) => `try { ${name} = await cuAdopt(${name}); } catch {}`).join("\n");
   const code = KERNEL_CODE + (adopt && /\bconst cuAdopt\b/.test(KERNEL_CODE) ? `\n${adopt}` : "");
   try {
     const reply = await rpc.request(
