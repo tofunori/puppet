@@ -423,6 +423,20 @@ test("records each action for the menu bar app", async () => {
   await s.close();
 });
 
+test("a browser chosen by a numeric id is recorded as the browser", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.call('let tab = await cua.createBrowserTab("1", "https://fr.wikipedia.org/");');
+  await s.call('await cua.listTabs({ browser: "2" });');
+  const lines = await waitFor(() => {
+    const all = readLines(path.join(path.dirname(ctx.stateFile), "puppet-activity.jsonl")).map((l) => JSON.parse(l));
+    return all.length === 2 && all;
+  });
+  assert.deepEqual(lines.map((l) => l.app), ["browser", "browser"]);
+  await s.close();
+});
+
 test("saves a picture of the app after each action for the menu bar app", async () => {
   const ctx = setup();
   const s = connect(ctx);
