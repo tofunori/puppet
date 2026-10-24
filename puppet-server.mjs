@@ -205,12 +205,15 @@ let appendsSinceTrim = 0;
 // The app or browser a call works on, read from the code: getApp("…"), createBrowserTab("…"),
 // getTab(…, { browser: "…" }). Otherwise the last one this session named.
 function appOf(code = "") {
-  const m =
-    /getApp\(\s*["'`]([^"'`]+)["'`]/.exec(code) ??
+  const app = /getApp\(\s*["'`]([^"'`]+)["'`]/.exec(code);
+  // A browser named by its id is a browser whatever the id: "chrome", or "1" and "2" when the
+  // extension runs in two Chromium browsers (Chrome and Vivaldi), so the menu bar app keeps it behind.
+  const browser =
     /createBrowserTab\(\s*["'`]([^"'`]+)["'`]/.exec(code) ??
     /getBrowser\(\s*\{[^}]*\bid:\s*["'`]([^"'`]+)["'`]/.exec(code) ??
     /browser:\s*["'`]([^"'`]+)["'`]/.exec(code);
-  if (m) lastApp = BROWSER_IDS.has(m[1]) ? "browser" : m[1];
+  if (app) lastApp = BROWSER_IDS.has(app[1]) ? "browser" : app[1];
+  else if (browser) lastApp = "browser";
   // Tabs reached through a browser binding: user.claimTab, tabs.get/new/selected, getTab.
   else if (/\.user\.(claimTab|openTabs)\(|\.tabs\.(get|new|selected|list)\(|cua\.getTab\(/.test(code)) lastApp = "browser";
   return lastApp;
