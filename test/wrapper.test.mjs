@@ -30,7 +30,7 @@ function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "puppet-test-"));
   const mcpDir = path.join(dir, "mcp");
   fs.mkdirSync(mcpDir);
-  for (const f of ["puppet-server.mjs", "puppet-end-turn.mjs"]) fs.copyFileSync(path.join(REPO, f), path.join(mcpDir, f));
+  for (const f of ["puppet-server.mjs", "puppet-end-turn.mjs", "puppet-kernel.js", "puppet-kernel.md"]) fs.copyFileSync(path.join(REPO, f), path.join(mcpDir, f));
   const skyApp = path.join(dir, "Fake Computer Use.app");
   const client = path.join(skyApp, SKY_CLIENT);
   fs.mkdirSync(path.dirname(client), { recursive: true });
@@ -231,6 +231,31 @@ test("declares the helper functions once in each new kernel", async () => {
   await sleep(200);
   await t.close();
   assert.ok(!off.events().some((e) => e.arguments?.title === "puppet helpers"));
+});
+
+test("adds Puppet's documentation after the docs of a new kernel, and its additions to the kernel", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  const first = await s.call("let app = await cua.getApp(\"com.apple.calculator\"); first");
+  const texts = first.result.content.map((c) => c.text);
+  assert.match(texts[0], /^## Computer Use/);
+  assert.match(texts[1], /^## Puppet additions/);
+  const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
+  assert.match(helpers.arguments.code, /const cuDecorate = /);
+  assert.match(helpers.arguments.code, /try \{ await cuAdopt\(app\); \} catch \{\}/, "the app bound by the first call is decorated");
+  const later = await s.call("later");
+  assert.equal(later.result.content.length, 1, "the documentation comes once");
+  await s.close();
+});
+
+test("keeps one of identical images in a result", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  const shot = await s.call("twoshots");
+  assert.deepEqual(shot.result.content.map((c) => c.type), ["image", "text"]);
+  await s.close();
 });
 
 test("adds a next step to errors the service reports in plain words", async () => {

@@ -2,7 +2,8 @@
 // A stand-in for cua_repl, for the wrapper tests. Like the real server it exits on a request that
 // arrives before `initialize`. Every event is appended to $FAKE_LOG as one JSON line.
 // `js` with code "crash" makes it exit, "esc" answers as the service does after the user pressed
-// Esc, "first" answers like the first call of a new kernel, "nowindow" fails as getApp does for an app
+// Esc, "first" (alone or after other statements) answers like the first call of a new kernel,
+// "twoshots" answers the same image twice, "nowindow" fails as getApp does for an app
 // with no window (with the docs of a new kernel), "invalid" fails as getApp does for an
 // unknown app, "big:N" answers N characters, "ask:<message>" sends a Computer Use app prompt with
 // that message and answers the client's reply as JSON, code calling getScreenshot answers a small
@@ -34,6 +35,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (msg.method === "tools/call") {
     log({ event: "call", name: msg.params.name, arguments: msg.params.arguments, meta: msg.params._meta });
     if (msg.params.arguments?.code === "crash") process.exit(3);
+    if (msg.params.arguments?.code === "twoshots") {
+      // getScreenshot() shows its image, and nodeRepl.emitImage shows it again.
+      const image = { type: "image", data: Buffer.from("same-jpeg").toString("base64"), mimeType: "image/jpeg" };
+      return reply({ content: [image, { ...image }, { type: "text", text: "done" }] });
+    }
     if (/\.getScreenshot\(/.test(msg.params.arguments?.code ?? "")) {
       return reply({ content: [{ type: "image", data: Buffer.from("fake-jpeg").toString("base64"), mimeType: "image/jpeg" }] });
     }
@@ -50,7 +56,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     const big = /^big:(\d+)$/.exec(msg.params.arguments?.code ?? "");
     if (big) return reply({ content: [{ type: "text", text: "x".repeat(Number(big[1])) }] });
-    if (msg.params.arguments?.code === "first") {
+    if (/(^|; )first$/.test(msg.params.arguments?.code ?? "")) {
       return reply({ content: [{ type: "text", text: "## Computer Use\n\n(documentation of a new kernel)" }] });
     }
     if (msg.params.arguments?.code === "nowindow") {

@@ -62,7 +62,18 @@ const HELPERS = process.env.PUPPET_HELPERS !== "0";
 // The Computer Use service takes it, with its own Screen Recording permission. PUPPET_SNAPSHOTS=0
 // turns this off.
 const SNAPSHOTS = process.env.PUPPET_SNAPSHOTS !== "0";
-const HELPERS_CODE = `const cuLines = (text, pattern = "", limit = 30, width = 240) => {
+// The helpers and Puppet's additions to the cua API (selectors, stale-index checks, typeText that
+// checks its work, tab.goto/waitFor/extractLinks...), with their documentation, which is added to
+// the documentation the first call of a kernel prints. Both files sit next to this one.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const readBeside = (name) => {
+  try {
+    return fs.readFileSync(path.join(HERE, name), "utf8");
+  } catch {
+    return null;
+  }
+};
+const KERNEL_CODE = readBeside("puppet-kernel.js") ?? `const cuLines = (text, pattern = "", limit = 30, width = 240) => {
   const re = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
   return String(text).split("\\n").filter((l) => re.test(l)).slice(0, limit).map((l) => l.slice(0, width)).join("\\n");
 };
@@ -72,6 +83,7 @@ const cuKey = (combo) => String(combo).split("+").map((k) => ({
   cmd: "super", command: "super", "⌘": "super", opt: "alt", option: "alt", "⌥": "alt",
   control: "ctrl", "⌃": "ctrl", enter: "Return", return: "Return", esc: "Escape", escape: "Escape",
 })[k.trim().toLowerCase()] ?? k.trim()).join("+");`;
+const KERNEL_DOCS = readBeside("puppet-kernel.md");
 // Without a sandbox profile from the client, node_repl runs the `js` kernel under `codex sandbox`:
 // the whole disk read-only and no network. Codex sends its own profile with every call; with
 // PUPPET_SANDBOX=off the wrapper sends "disabled", as a Codex set to danger-full-access does.
@@ -198,6 +210,10 @@ function appOf(code = "") {
   return lastApp;
 }
 const BROWSER_IDS = new Set(["chrome", "edge", "iab", "dot"]);
+// Every variable an app or tab is bound to in this kernel. The first call of a kernel binds one
+// before Puppet's additions exist; loading them then decorates it in place.
+const BINDING_RE = /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
+const kernelBindings = new Set();
 
 function activityStart(id, params) {
   const code = params?.arguments?.code ?? "";
@@ -209,6 +225,7 @@ function activityStart(id, params) {
     ),
   ].at(-1);
   if (binding) targetBinding = binding[1];
+  for (const m of code.matchAll(BINDING_RE)) kernelBindings.add(m[1]);
   callsInFlight.set(id, entry);
   updateEntry({ busy: true, turnActive: true, action: entry.title, app: entry.app, since: new Date(entry.t0).toISOString() });
 }
@@ -661,10 +678,13 @@ function forwardToClient(line, msg) {
     // One hidden call at a time: the helpers first in a new kernel, then the snapshot.
     const fresh = tool === "js" && freshKernel(msg);
     if (fresh) setTimeout(() => loadHelpers().then(takeSnapshot), 0);
-    if (tool === "js" && (addErrorHint(msg) | capOutput(msg))) line = JSON.stringify(msg);
+    if (tool === "js" && ((fresh && addKernelDocs(msg)) | dropDuplicateImages(msg) | addErrorHint(msg) | capOutput(msg))) line = JSON.stringify(msg);
     pendingCalls.delete(msg.id);
     activityEnd(msg.id, msg);
-    if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) targetBinding = null;
+    if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
+      targetBinding = null;
+      kernelBindings.clear();
+    }
     else if (tool === "js" && !fresh && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
     if (tool === "js_reset" || (tool === "js" && (isKernelReset(msg) || isUserStop(msg)))) endTurnWhenIdle = true;
     if (pendingCalls.size === 0) {
@@ -686,6 +706,32 @@ function forwardToClient(line, msg) {
     line = JSON.stringify(msg);
   }
   process.stdout.write(line + "\n");
+}
+
+// Puppet's additions to the documentation a new kernel prints, right after it.
+function addKernelDocs(msg) {
+  if (!KERNEL_DOCS) return false;
+  const content = msg.result.content;
+  const at = content.findIndex((c) => typeof c?.text === "string" && c.text.startsWith("## Computer Use"));
+  content.splice(at + 1, 0, { type: "text", text: KERNEL_DOCS });
+  return true;
+}
+
+// getScreenshot() already shows its image; `nodeRepl.emitImage(await tab.getScreenshot())` showed
+// the same picture twice. Keep the first of identical images.
+function dropDuplicateImages(msg) {
+  const content = msg.result?.content;
+  if (!Array.isArray(content)) return false;
+  const seen = new Set();
+  const kept = content.filter((c) => {
+    if (c?.type !== "image" || typeof c.data !== "string") return true;
+    if (seen.has(c.data)) return false;
+    seen.add(c.data);
+    return true;
+  });
+  if (kept.length === content.length) return false;
+  msg.result.content = kept;
+  return true;
 }
 
 const resultTexts = (msg) =>
@@ -724,6 +770,7 @@ function capOutput(msg) {
 // (-10000 to -10020) do not reach the result; only these messages do.
 const ERROR_HINTS = [
   [/Invalid app:/, "Find the app's exact name or bundle id with `await cua.listApps({ emit: false })`, then call getApp with it."],
+  [/is an invalid element ID|element ID is no longer valid|is stale or missing/, "The element index is stale: the tree was renumbered. Read it again with getAXState({ full: true }), or target the element by selector, for example click({ id: \"…\" }) or click({ text: \"…\", role: \"button\" })."],
   [/was not approved to use|not approved to record/, "The user declined this. Do not retry; ask them what to do."],
   [/explicitly stopped by the user/, "The user pressed Esc. Stop, say so, and wait for their next message."],
   [/unavailable because the current turn ended/, "The turn has ended. Call again: the next call starts a new turn."],
@@ -810,10 +857,12 @@ async function takeSnapshot() {
 }
 
 async function loadHelpers() {
+  const adopt = [...kernelBindings].map((name) => `try { await cuAdopt(${name}); } catch {}`).join("\n");
+  const code = KERNEL_CODE + (adopt && /\bconst cuAdopt\b/.test(KERNEL_CODE) ? `\n${adopt}` : "");
   try {
     const reply = await rpc.request(
       "tools/call",
-      { name: "js", arguments: { code: HELPERS_CODE, title: "puppet helpers" }, _meta: callMeta() },
+      { name: "js", arguments: { code, title: "puppet helpers" }, _meta: callMeta() },
       30000,
     );
     if (reply.error || reply.result?.isError) log(`helpers not loaded: ${JSON.stringify(reply.error ?? reply.result.content)}`);
