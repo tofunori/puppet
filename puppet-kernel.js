@@ -53,14 +53,25 @@ const cuParse = (text) => {
 };
 
 const __cuIsRe = (x) => Object.prototype.toString.call(x) === "[object RegExp]";
-const __cuNorm = (s) => String(s ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+// Accents, case, spaces, and the typographic hyphens and quotes macOS and pages use ("Wi‑Fi" with a
+// non-breaking hyphen, "d’achats") folded, so that "Wi-Fi" and "d'achats" match them.
+const __cuNorm = (s) =>
+  String(s ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 const __cuEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Role names as the trees print them, in English and in French (the macOS tree uses the system
 // language). A role not listed here is matched as written.
 const __cuRoles = {
   button: ["button", "bouton", "pop up button", "menu button", "bouton de menu", "bouton de menu local"],
-  "text field": ["text field", "textbox", "text box", "search field", "searchbox", "search box", "combobox", "combo box", "text area", "textarea", "champ de texte", "champ de recherche", "zone de texte", "champ de saisie", "zone de liste modifiable"],
+  "text field": ["text field", "search text field", "secure text field", "textbox", "text box", "search field", "searchbox", "search box", "combobox", "combo box", "text area", "textarea", "champ de texte", "champ de recherche", "zone de texte", "champ de saisie", "zone de liste modifiable"],
   link: ["link", "lien"],
   checkbox: ["checkbox", "check box", "case à cocher", "case a cocher"],
   "radio button": ["radio button", "radio", "bouton radio"],
