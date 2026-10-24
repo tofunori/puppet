@@ -155,6 +155,13 @@ test("getAXState({ full: true }) reads the whole tree", async () => {
   assert.deepEqual(plain(seen), [{ disableDiffing: true }, {}]);
 });
 
+test("role \"text field\" also names a search text field (Wikipedia's search box)", async () => {
+  const tree = '0 AXWebArea Wikipédia\n\t7 search text field (settable) Description: Rechercher sur Wikipédia, ID: searchInput\n\t8 button Rechercher';
+  const k = kernel({});
+  const found = k.cuMatch(k.cuParse(tree), { role: "text field", name: /Rechercher/i });
+  assert.deepEqual(plain(found.map((e) => e.index)), [7]);
+});
+
 test("a selector with several matches lists them, and one without lists close candidates", async () => {
   const tree = "0 window\n\t1 button Rechercher\n\t2 button Rechercher\n\t3 link Description: Mon sac";
   const app = { getAXState: async () => tree, click: async () => {} };

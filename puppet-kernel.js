@@ -60,7 +60,7 @@ const __cuEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // language). A role not listed here is matched as written.
 const __cuRoles = {
   button: ["button", "bouton", "pop up button", "menu button", "bouton de menu", "bouton de menu local"],
-  "text field": ["text field", "textbox", "text box", "search field", "searchbox", "search box", "combobox", "combo box", "text area", "textarea", "champ de texte", "champ de recherche", "zone de texte", "champ de saisie", "zone de liste modifiable"],
+  "text field": ["text field", "search text field", "secure text field", "textbox", "text box", "search field", "searchbox", "search box", "combobox", "combo box", "text area", "textarea", "champ de texte", "champ de recherche", "zone de texte", "champ de saisie", "zone de liste modifiable"],
   link: ["link", "lien"],
   checkbox: ["checkbox", "check box", "case à cocher", "case a cocher"],
   "radio button": ["radio button", "radio", "bouton radio"],
