@@ -795,9 +795,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.busy || model.turnActive { lastActive = Date() }
         updateIcon()
         // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
-        // or always when pinned.
-        let linger: TimeInterval = model.phase == .stopped ? 2 : 10
-        var showFloating = model.floatingPinned || (model.floatingEnabled && Date().timeIntervalSince(lastActive) < linger)
+        // or always when pinned. Without a picture to show (the tab was closed), it shows only while
+        // puppet acts: an empty frame between actions or after the turn says nothing.
+        let empty = model.preview == nil && !model.splitShown
+        let linger: TimeInterval = model.phase == .stopped ? 2 : empty ? 0 : 10
+        let inTurn = model.busy || (model.turnActive && !empty)
+        var showFloating = model.floatingPinned || (model.floatingEnabled && (inTurn || Date().timeIntervalSince(lastActive) < linger))
         // Hidden while the user is in the app they opened from it; back when they leave that app.
         if let pid = hiddenForApp {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid || Date().timeIntervalSince(openedAt) < 1.5 {
@@ -809,7 +812,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if showFloating { showFloatingWindow() } else { hideFloatingWindow() }
         let menuShown = menuPanel?.isVisible == true
         if menuShown { placeMenuPanel() }
-        if (menuShown || showFloating) && (model.busy || Date().timeIntervalSince(lastPicture) >= 0.5) {
+        // Also in a turn while hidden, so a picture that arrives brings the window back.
+        if (menuShown || showFloating || model.turnActive) && (model.busy || Date().timeIntervalSince(lastPicture) >= 0.5) {
             model.refreshPreview()
             lastPicture = Date()
         }
