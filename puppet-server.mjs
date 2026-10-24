@@ -88,6 +88,8 @@ const KERNEL_DOCS = readBeside("puppet-kernel.md");
 // already has them (`getApp("Calculatrice")` by its localized name, for instance). The fake server
 // in the tests splits the cell here.
 const KERNEL_SEPARATOR = "\n;// ---- end of Puppet's additions; the call's own code follows ----\n";
+// Lines in front of the call's own code, taken back out of the line numbers its errors report.
+const KERNEL_LINES = (KERNEL_CODE + KERNEL_SEPARATOR).split("\n").length - 1;
 // Without a sandbox profile from the client, node_repl runs the `js` kernel under `codex sandbox`:
 // the whole disk read-only and no network. Codex sends its own profile with every call; with
 // PUPPET_SANDBOX=off the wrapper sends "disabled", as a Codex set to danger-full-access does.
@@ -680,11 +682,21 @@ function forwardToClient(line, msg) {
   }
   if (msg && !("method" in msg) && pendingCalls.has(msg.id)) {
     const tool = pendingCalls.get(msg.id);
+    if (tool === "js" && heldDocs && msg.result) {
+      msg.result.content = [...heldDocs, ...(msg.result.content ?? [])];
+      heldDocs = null;
+    }
     // One hidden call at a time: the additions first when a new kernel lacks them, then the snapshot.
     const fresh = tool === "js" && freshKernel(msg);
     const check = tool === "js" && kernelOutcome(msg, fresh);
     if (check) setTimeout(() => ensureKernel().then(takeSnapshot), 0);
-    if (tool === "js" && ((fresh && addKernelDocs(msg)) | dropDuplicateImages(msg) | addErrorHint(msg) | capOutput(msg))) line = JSON.stringify(msg);
+    if (tool === "js") {
+      if (fresh) addKernelDocs(msg);
+      dropDuplicateImages(msg);
+      addErrorHint(msg);
+      capOutput(msg);
+      line = JSON.stringify(msg);
+    }
     pendingCalls.delete(msg.id);
     activityEnd(msg.id, msg);
     if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
@@ -853,9 +865,29 @@ function kernelOutcome(msg, fresh) {
       kernelLoaded = true;
       return false;
     }
+    shiftLines(msg);
     return true;
   }
   return fresh && !kernelLoaded;
+}
+
+// A first call that does not even parse ("let x = ;") never starts the kernel: the kernel then
+// prints its documentation to the hidden check. It is held and shown with the next call's result.
+let heldDocs = null;
+const holdDocs = (reply) => {
+  const docs = (reply?.result?.content ?? []).filter((c) => typeof c?.text === "string" && c.text.startsWith("## Computer Use"));
+  if (docs.length) heldDocs = docs;
+};
+
+// The line numbers of a prefixed call's errors ("[722:8-722:9]: Unexpected token", "<anonymous>:722:8"),
+// counted from the call's own code.
+function shiftLines(msg) {
+  const shift = (t) =>
+    t
+      .replace(/\[(\d+):(\d+)-(\d+):(\d+)\]/g, (all, a, b, c, d) => (Number(a) > KERNEL_LINES ? `[${a - KERNEL_LINES}:${b}-${c - KERNEL_LINES}:${d}]` : all))
+      .replace(/(<anonymous>:)(\d+)(:\d+)/g, (all, p, l, r) => (Number(l) > KERNEL_LINES ? `${p}${l - KERNEL_LINES}${r}` : all));
+  for (const c of msg.result?.content ?? []) if (typeof c?.text === "string") c.text = shift(c.text);
+  if (typeof msg.error?.message === "string") msg.error.message = shift(msg.error.message);
 }
 
 async function ensureKernel() {
@@ -865,6 +897,7 @@ async function ensureKernel() {
       { name: "js", arguments: { code: "nodeRepl.write(typeof cuDecorate);", title: "puppet check" }, _meta: callMeta() },
       30000,
     );
+    holdDocs(probe);
     if (resultTexts(probe).some((t) => t.trim() === "function")) kernelLoaded = true;
     else await loadHelpers();
   } catch (e) {
@@ -919,6 +952,7 @@ async function loadHelpers() {
       { name: "js", arguments: { code, title: "puppet helpers" }, _meta: callMeta() },
       30000,
     );
+    if (!heldDocs) holdDocs(reply);
     if (reply.error || reply.result?.isError) log(`helpers not loaded: ${JSON.stringify(reply.error ?? reply.result.content)}`);
     else kernelLoaded = true;
   } catch (e) {
@@ -1022,6 +1056,7 @@ async function restartServer(reason) {
   ready = false;
   kernelLoaded = false;
   prefixedCalls.clear();
+  heldDocs = null;
   for (const id of pendingCalls.keys()) {
     const error = { code: -32603, message: `${SERVER_NAME} restarted (${reason}); call the tool again` };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error }) + "\n");

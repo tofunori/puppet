@@ -265,6 +265,22 @@ test("declares Puppet's additions again when the first call failed and took them
   assert.equal(ctx.events().filter((e) => e.arguments?.kernel).length, 1, "later calls are not prefixed again");
 });
 
+test("a first call that does not parse: its line numbers count from its own code, and the docs come with the next call", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  const first = await s.call("let x = ;");
+  assert.equal(first.result.isError, true);
+  assert.match(first.result.content[0].text, /^\[1:8-1:9\]: Unexpected token: ';'/);
+  await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
+  const next = await s.call("later");
+  const texts = next.result.content.map((c) => c.text);
+  assert.match(texts[0], /^## Computer Use/);
+  assert.match(texts[1], /^## Puppet additions/);
+  assert.equal(texts.at(-1), "ok");
+  await s.close();
+});
+
 test("keeps one of identical images in a result", async () => {
   const ctx = setup();
   const s = connect(ctx);

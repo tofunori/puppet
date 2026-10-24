@@ -17,6 +17,7 @@ const version = process.env.FAKE_VERSION ?? "1";
 const KERNEL_SEPARATOR = "\n;// ---- end of Puppet's additions; the call's own code follows ----\n";
 const log = (event) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ version, ...event }) + "\n");
 let initialized = false;
+let unparsed = false;
 const pending = new Map();
 
 log({ event: "started", analyticsDisabled: process.env.NODE_REPL_DISABLE_ANALYTICS === "1" });
@@ -40,8 +41,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     if (own !== undefined) msg.params.arguments = { ...msg.params.arguments, code: own, kernel };
     log({ event: "call", name: msg.params.name, arguments: msg.params.arguments, meta: msg.params._meta });
     if (/typeof cuDecorate/.test(msg.params.arguments?.code ?? "")) {
-      // A failed first call took the additions' declarations with it.
-      return reply({ content: [{ type: "text", text: "undefined" }] });
+      // A failed first call took the additions' declarations with it. After one that did not parse,
+      // the kernel starts now and prints its documentation here.
+      const docs = unparsed ? [{ type: "text", text: "## Computer Use\n\n(documentation of a new kernel)" }] : [];
+      unparsed = false;
+      return reply({ content: [...docs, { type: "text", text: "undefined" }] });
+    }
+    if (msg.params.arguments?.code === "let x = ;") {
+      // A syntax error: the cell does not run, the kernel does not start, the line counts the prefix.
+      unparsed = true;
+      const line = (msg.params.arguments.kernel ?? "").split("\n").length + 2;
+      return reply({ content: [{ type: "text", text: `[${line}:8-${line}:9]: Unexpected token: ';'` }], isError: true });
     }
     if (msg.params.arguments?.code === "crash") process.exit(3);
     if (msg.params.arguments?.code === "twoshots") {
