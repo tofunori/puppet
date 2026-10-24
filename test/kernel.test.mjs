@@ -162,6 +162,14 @@ test("role \"text field\" also names a search text field (Wikipedia's search box
   assert.deepEqual(plain(found.map((e) => e.index)), [7]);
 });
 
+test("selectors match typographic hyphens and apostrophes as typed (System Settings' \"Wi‑Fi\" row)", async () => {
+  const tree = "0 fenêtre standard Réglages\n\t7 row (selectable) Wi\u2011Fi\n\t8 row (selectable) Bluetooth\n\t9 link Description: Livraison gratuite dès 50 $ d\u2019achats";
+  const k = kernel({});
+  const els = k.cuParse(tree);
+  assert.deepEqual(plain(k.cuMatch(els, { role: "row", text: "Wi-Fi" }).map((e) => e.index)), [7]);
+  assert.deepEqual(plain(k.cuMatch(els, { text: "d'achats" }).map((e) => e.index)), [9]);
+});
+
 test("a selector with several matches lists them, and one without lists close candidates", async () => {
   const tree = "0 window\n\t1 button Rechercher\n\t2 button Rechercher\n\t3 link Description: Mon sac";
   const app = { getAXState: async () => tree, click: async () => {} };

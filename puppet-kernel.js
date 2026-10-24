@@ -53,7 +53,18 @@ const cuParse = (text) => {
 };
 
 const __cuIsRe = (x) => Object.prototype.toString.call(x) === "[object RegExp]";
-const __cuNorm = (s) => String(s ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
+// Accents, case, spaces, and the typographic hyphens and quotes macOS and pages use ("Wi‑Fi" with a
+// non-breaking hyphen, "d’achats") folded, so that "Wi-Fi" and "d'achats" match them.
+const __cuNorm = (s) =>
+  String(s ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 const __cuEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Role names as the trees print them, in English and in French (the macOS tree uses the system
