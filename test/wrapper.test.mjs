@@ -211,18 +211,20 @@ test("sends a disabled sandbox profile only when PUPPET_SANDBOX=off", async () =
   assert.match(profile.sandboxCwd, /^file:\/\//);
 });
 
-test("declares the helper functions once in each new kernel", async () => {
+test("runs the first call of each new kernel after Puppet's additions, in the same cell", async () => {
   const ctx = setup();
   const s = connect(ctx);
   await s.init();
   await s.call("first");
-  const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
-  assert.match(helpers.arguments.code, /const cuFind = /);
-  assert.equal(sessionOf(helpers).session_id, sessionOf(ctx.events().find((e) => e.arguments?.code === "first")).session_id);
   await s.call("later");
   await sleep(200);
   await s.close();
-  assert.equal(ctx.events().filter((e) => e.arguments?.title === "puppet helpers").length, 1);
+  const calls = ctx.events().filter((e) => e.event === "call");
+  assert.match(calls[0].arguments.kernel, /const cuFind = /);
+  assert.match(calls[0].arguments.kernel, /const cuDecorate = /);
+  assert.equal(calls[0].arguments.code, "first");
+  assert.ok(!calls.slice(1).some((e) => e.arguments?.kernel), "only the first call carries them");
+  assert.ok(!calls.some((e) => /^puppet (helpers|check)$/.test(e.arguments?.title ?? "")), "no hidden call needed");
 
   const off = setup();
   const t = connect(off, { env: { PUPPET_HELPERS: "0" } });
@@ -230,35 +232,37 @@ test("declares the helper functions once in each new kernel", async () => {
   await t.call("first");
   await sleep(200);
   await t.close();
-  assert.ok(!off.events().some((e) => e.arguments?.title === "puppet helpers"));
+  assert.ok(!off.events().some((e) => e.arguments?.kernel || e.arguments?.title === "puppet helpers"));
 });
 
-test("adds Puppet's documentation after the docs of a new kernel, and its additions to the kernel", async () => {
+test("adds Puppet's documentation after the docs of a new kernel, once", async () => {
   const ctx = setup();
   const s = connect(ctx);
   await s.init();
-  const first = await s.call("let app = await cua.getApp(\"com.apple.calculator\"); first");
+  const first = await s.call("let app = await cua.getApp(\"Calculatrice\"); first");
   const texts = first.result.content.map((c) => c.text);
   assert.match(texts[0], /^## Computer Use/);
   assert.match(texts[1], /^## Puppet additions/);
-  const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
-  assert.match(helpers.arguments.code, /const cuDecorate = /);
-  assert.match(helpers.arguments.code, /try \{ app = await cuAdopt\(app\); \} catch \{\}/, "the app bound by the first call is decorated");
   const later = await s.call("later");
   assert.equal(later.result.content.length, 1, "the documentation comes once");
   await s.close();
 });
 
-test("a first call that fails still loads Puppet's additions in the kernel", async () => {
+test("declares Puppet's additions again when the first call failed and took them along", async () => {
   const ctx = setup();
   const s = connect(ctx);
   await s.init();
-  const first = await s.call("let app = await cua.getApp(\"Calculatrice\"); failfirst");
+  const first = await s.call("let app = await cua.getApp(\"com.example.none\"); failfirst");
   assert.equal(first.result.isError, true);
   assert.ok(first.result.content.some((c) => /^## Puppet additions/.test(c.text ?? "")));
+  await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet check"));
   const helpers = await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet helpers"));
   assert.match(helpers.arguments.code, /const cuDecorate = /);
+  assert.match(helpers.arguments.code, /try \{ app = await cuAdopt\(app\); \} catch \{\}/, "a binding of the failed call is adopted if it exists");
+  await s.call("later");
+  await sleep(200);
   await s.close();
+  assert.equal(ctx.events().filter((e) => e.arguments?.kernel).length, 1, "later calls are not prefixed again");
 });
 
 test("keeps one of identical images in a result", async () => {

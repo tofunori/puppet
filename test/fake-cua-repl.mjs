@@ -14,6 +14,7 @@ import fs from "node:fs";
 import readline from "node:readline";
 
 const version = process.env.FAKE_VERSION ?? "1";
+const KERNEL_SEPARATOR = "\n;// ---- end of Puppet's additions; the call's own code follows ----\n";
 const log = (event) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ version, ...event }) + "\n");
 let initialized = false;
 const pending = new Map();
@@ -34,7 +35,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (msg.method === "tools/list") {
     reply({ tools: ["js", "js_reset", "turn_ended"].map((name) => ({ name, inputSchema: { type: "object" } })) });
   } else if (msg.method === "tools/call") {
+    // The first call of a kernel comes after Puppet's additions: answer the call's own code.
+    const [kernel, own] = String(msg.params.arguments?.code ?? "").split(KERNEL_SEPARATOR);
+    if (own !== undefined) msg.params.arguments = { ...msg.params.arguments, code: own, kernel };
     log({ event: "call", name: msg.params.name, arguments: msg.params.arguments, meta: msg.params._meta });
+    if (/typeof cuDecorate/.test(msg.params.arguments?.code ?? "")) {
+      // A failed first call took the additions' declarations with it.
+      return reply({ content: [{ type: "text", text: "undefined" }] });
+    }
     if (msg.params.arguments?.code === "crash") process.exit(3);
     if (msg.params.arguments?.code === "twoshots") {
       // getScreenshot() shows its image, and nodeRepl.emitImage shows it again.
