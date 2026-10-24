@@ -517,12 +517,25 @@ const __cuHit = async (target, [x, y], tab) => {
 const __cuFullUrls = async (target, text) => {
   let hrefs = [];
   try {
-    hrefs = await target.playwright.evaluate(() => [...document.querySelectorAll("a[href]")].map((a) => a.href));
+    hrefs = await target.playwright.evaluate(() =>
+      [...document.querySelectorAll("a[href]")].map((a) => ({ href: a.href, name: (a.getAttribute("aria-label") || a.innerText || a.title || "").replace(/\s+/g, " ").trim() })),
+    );
   } catch {
     return text;
   }
   const bare = (u) => u.replace(/^[a-z]+:\/\//i, "").replace(/^www\./i, "");
-  const unique = [...new Set(hrefs)];
+  const unique = [...new Set(hrefs.map((h) => (typeof h === "string" ? h : h.href)))];
+  // A value cut down to "…" alone: the link's name, when exactly one link on the page has it.
+  const byName = new Map();
+  for (const h of hrefs) {
+    if (typeof h === "string" || !h.name) continue;
+    const key = __cuNorm(h.name);
+    byName.set(key, byName.has(key) && byName.get(key) !== h.href ? null : h.href);
+  }
+  text = text.replace(/^(.*\blink\b.*?Description: (.+?), Value: )…(?=,|$)/gm, (all, start, name) => {
+    const href = byName.get(__cuNorm(name));
+    return href ? start + href : all;
+  });
   return text.replace(/((?:https?:\/\/)?(?:www\.)?[\w-]+(?:\.[\w-]+)+\/[^\s,"'…]*)…/g, (all, prefix) => {
     const p = bare(prefix);
     const found = [...new Set(unique.filter((h) => bare(h).startsWith(p)))];

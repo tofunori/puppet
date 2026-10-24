@@ -197,6 +197,7 @@ function searchTab() {
     out.push("\t199 text field (settable) Inscrivez-vous à l'infolettre");
     out.push("\t31 link Description: Mon sac, Value: simons.ca/fr/cart, ID: myBag");
     out.push("\t49 link Description: Pour elle, Value: simons.ca/fr/vetements-femme/les-incontournables-…");
+    out.push("\t224 link Description: FAQ, Value: …");
     if (page.focus) out.push(`The focused UI element is ${page.focus}`);
     return out.join("\n");
   };
@@ -206,7 +207,7 @@ function searchTab() {
       async evaluate(fn, arg) {
         const src = String(fn);
         if (src.includes("elementFromPoint")) return { tag: "a", role: null, text: "Derniers produits vus", href: "https://www.simons.ca/fr/x", id: null, arg };
-        if (src.includes("innerText")) {
+        if (src.includes("innerText") && !src.includes("name:")) {
           return [
             { href: "https://www.simons.ca/fr/p/chandail-1", text: "swatch swatch swatch\nChandail en laine\n89,00 $ CAN\n+4\nAPERÇU RAPIDE DÉTAILS COMPLETS" },
             { href: "https://www.simons.ca/fr/p/chandail-1", text: "Chandail en laine" },
@@ -215,7 +216,11 @@ function searchTab() {
             { href: "javascript:void(0)", text: "Menu" },
           ];
         }
-        return ["https://www.simons.ca/fr/vetements-femme/les-incontournables-contemporains--1234", "https://www.simons.ca/fr/cart"];
+        return [
+          { href: "https://www.simons.ca/fr/vetements-femme/les-incontournables-contemporains--1234", name: "Pour elle" },
+          { href: "https://www.simons.ca/fr/cart", name: "Mon sac" },
+          { href: "https://www.simons.ca/fr/informations/faq--a1", name: "FAQ" },
+        ];
       },
       async waitForLoadState() {},
     },
@@ -318,6 +323,7 @@ test("getAXState({ fullUrls: true }) restores URLs cut with an ellipsis", async 
   tab = k.cuDecorate(tab);
   const text = await tab.getAXState({ fullUrls: true });
   assert.match(text, /Value: https:\/\/www\.simons\.ca\/fr\/vetements-femme\/les-incontournables-contemporains--1234/);
+  assert.match(text, /224 link Description: FAQ, Value: https:\/\/www\.simons\.ca\/fr\/informations\/faq--a1/, "a value cut to … alone, by the link's name");
   assert.equal(k.written.length, 1, "printed once");
 });
 
