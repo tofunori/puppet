@@ -62,7 +62,18 @@ const HELPERS = process.env.PUPPET_HELPERS !== "0";
 // The Computer Use service takes it, with its own Screen Recording permission. PUPPET_SNAPSHOTS=0
 // turns this off.
 const SNAPSHOTS = process.env.PUPPET_SNAPSHOTS !== "0";
-const HELPERS_CODE = `const cuLines = (text, pattern = "", limit = 30, width = 240) => {
+// The helpers and Puppet's additions to the cua API (selectors, stale-index checks, typeText that
+// checks its work, tab.goto/waitFor/extractLinks...), with their documentation, which is added to
+// the documentation the first call of a kernel prints. Both files sit next to this one.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const readBeside = (name) => {
+  try {
+    return fs.readFileSync(path.join(HERE, name), "utf8");
+  } catch {
+    return null;
+  }
+};
+const KERNEL_CODE = readBeside("puppet-kernel.js") ?? `const cuLines = (text, pattern = "", limit = 30, width = 240) => {
   const re = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
   return String(text).split("\\n").filter((l) => re.test(l)).slice(0, limit).map((l) => l.slice(0, width)).join("\\n");
 };
@@ -72,6 +83,13 @@ const cuKey = (combo) => String(combo).split("+").map((k) => ({
   cmd: "super", command: "super", "⌘": "super", opt: "alt", option: "alt", "⌥": "alt",
   control: "ctrl", "⌃": "ctrl", enter: "Return", return: "Return", esc: "Escape", escape: "Escape",
 })[k.trim().toLowerCase()] ?? k.trim()).join("+");`;
+const KERNEL_DOCS = readBeside("puppet-kernel.md");
+// The first `js` call of a new kernel runs after Puppet's additions, in the same cell, so that it
+// already has them (`getApp("Calculatrice")` by its localized name, for instance). The fake server
+// in the tests splits the cell here.
+const KERNEL_SEPARATOR = "\n;// ---- end of Puppet's additions; the call's own code follows ----\n";
+// Lines in front of the call's own code, taken back out of the line numbers its errors report.
+const KERNEL_LINES = (KERNEL_CODE + KERNEL_SEPARATOR).split("\n").length - 1;
 // Without a sandbox profile from the client, node_repl runs the `js` kernel under `codex sandbox`:
 // the whole disk read-only and no network. Codex sends its own profile with every call; with
 // PUPPET_SANDBOX=off the wrapper sends "disabled", as a Codex set to danger-full-access does.
@@ -198,6 +216,10 @@ function appOf(code = "") {
   return lastApp;
 }
 const BROWSER_IDS = new Set(["chrome", "edge", "iab", "dot"]);
+// Every variable an app or tab is bound to in this kernel. The first call of a kernel binds one
+// before Puppet's additions exist; loading them then decorates it in place.
+const BINDING_RE = /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
+const kernelBindings = new Set();
 
 function activityStart(id, params) {
   const code = params?.arguments?.code ?? "";
@@ -209,6 +231,7 @@ function activityStart(id, params) {
     ),
   ].at(-1);
   if (binding) targetBinding = binding[1];
+  for (const m of code.matchAll(BINDING_RE)) kernelBindings.add(m[1]);
   callsInFlight.set(id, entry);
   updateEntry({ busy: true, turnActive: true, action: entry.title, app: entry.app, since: new Date(entry.t0).toISOString() });
 }
@@ -632,6 +655,7 @@ function forwardToServer(line) {
       turnUsed = true;
       pendingCalls.set(m.id, m.params?.name);
       activityStart(m.id, m.params);
+      prefixKernel(m);
       clearTimeout(idleTimer);
     } else if (m?.method === "initialize") {
       // cua_repl only requests approvals from clients that advertise form elicitation.
@@ -658,14 +682,29 @@ function forwardToClient(line, msg) {
   }
   if (msg && !("method" in msg) && pendingCalls.has(msg.id)) {
     const tool = pendingCalls.get(msg.id);
-    // One hidden call at a time: the helpers first in a new kernel, then the snapshot.
+    if (tool === "js" && heldDocs && msg.result) {
+      msg.result.content = [...heldDocs, ...(msg.result.content ?? [])];
+      heldDocs = null;
+    }
+    // One hidden call at a time: the additions first when a new kernel lacks them, then the snapshot.
     const fresh = tool === "js" && freshKernel(msg);
-    if (fresh) setTimeout(() => loadHelpers().then(takeSnapshot), 0);
-    if (tool === "js" && (addErrorHint(msg) | capOutput(msg))) line = JSON.stringify(msg);
+    const check = tool === "js" && kernelOutcome(msg, fresh);
+    if (check) setTimeout(() => ensureKernel().then(takeSnapshot), 0);
+    if (tool === "js") {
+      if (fresh) addKernelDocs(msg);
+      dropDuplicateImages(msg);
+      addErrorHint(msg);
+      capOutput(msg);
+      line = JSON.stringify(msg);
+    }
     pendingCalls.delete(msg.id);
     activityEnd(msg.id, msg);
-    if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) targetBinding = null;
-    else if (tool === "js" && !fresh && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
+    if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
+      targetBinding = null;
+      kernelBindings.clear();
+      kernelLoaded = false;
+    }
+    else if (tool === "js" && !check && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
     if (tool === "js_reset" || (tool === "js" && (isKernelReset(msg) || isUserStop(msg)))) endTurnWhenIdle = true;
     if (pendingCalls.size === 0) {
       clearTimeout(idleTimer);
@@ -686,6 +725,32 @@ function forwardToClient(line, msg) {
     line = JSON.stringify(msg);
   }
   process.stdout.write(line + "\n");
+}
+
+// Puppet's additions to the documentation a new kernel prints, right after it.
+function addKernelDocs(msg) {
+  if (!KERNEL_DOCS) return false;
+  const content = msg.result.content;
+  const at = content.findIndex((c) => typeof c?.text === "string" && c.text.startsWith("## Computer Use"));
+  content.splice(at + 1, 0, { type: "text", text: KERNEL_DOCS });
+  return true;
+}
+
+// getScreenshot() already shows its image; `nodeRepl.emitImage(await tab.getScreenshot())` showed
+// the same picture twice. Keep the first of identical images.
+function dropDuplicateImages(msg) {
+  const content = msg.result?.content;
+  if (!Array.isArray(content)) return false;
+  const seen = new Set();
+  const kept = content.filter((c) => {
+    if (c?.type !== "image" || typeof c.data !== "string") return true;
+    if (seen.has(c.data)) return false;
+    seen.add(c.data);
+    return true;
+  });
+  if (kept.length === content.length) return false;
+  msg.result.content = kept;
+  return true;
 }
 
 const resultTexts = (msg) =>
@@ -724,6 +789,7 @@ function capOutput(msg) {
 // (-10000 to -10020) do not reach the result; only these messages do.
 const ERROR_HINTS = [
   [/Invalid app:/, "Find the app's exact name or bundle id with `await cua.listApps({ emit: false })`, then call getApp with it."],
+  [/is an invalid element ID|element ID is no longer valid|is stale or missing/, "The element index is stale: the tree was renumbered. Read it again with getAXState({ full: true }), or target the element by selector, for example click({ id: \"…\" }) or click({ text: \"…\", role: \"button\" })."],
   [/was not approved to use|not approved to record/, "The user declined this. Do not retry; ask them what to do."],
   [/explicitly stopped by the user/, "The user pressed Esc. Stop, say so, and wait for their next message."],
   [/unavailable because the current turn ended/, "The turn has ended. Call again: the next call starts a new turn."],
@@ -772,10 +838,77 @@ function callMeta(clientMeta = {}) {
   return { ...clientMeta, ...sandbox, [META_KEY]: turnMeta(SESSION_ID, turnId) };
 }
 
-// cua_repl prints its documentation on the first call of a new kernel; a failed first call leaves
-// the kernel untouched, so only a successful one counts.
+// Whether this kernel has Puppet's additions. The first `js` call while it does not carries them
+// (prefixKernel); a call that fails takes its declarations with it, so the server then checks.
+let kernelLoaded = false;
+const prefixedCalls = new Set();
+
+function prefixKernel(m) {
+  if (!HELPERS || kernelLoaded || prefixedCalls.size || m.params?.name !== "js" || typeof m.params.arguments?.code !== "string") return;
+  m.params = { ...m.params, arguments: { ...m.params.arguments, code: KERNEL_CODE + KERNEL_SEPARATOR + m.params.arguments.code } };
+  prefixedCalls.add(m.id);
+}
+
+// Settles kernelLoaded from a `js` result; true when the kernel must be checked (and the additions
+// declared if they are missing) by a hidden call.
+function kernelOutcome(msg, fresh) {
+  if (!HELPERS) return false;
+  if (prefixedCalls.delete(msg.id)) {
+    const texts = resultTexts(msg);
+    // The kernel was not new after all: the additions are there, the call's own code did not run.
+    if (texts.some((t) => /'(?:cu|__cu)\w*' has already been declared/.test(t))) {
+      kernelLoaded = true;
+      msg.result?.content?.push({ type: "text", text: "[puppet] This kernel already had Puppet's additions, so your code did not run. Run the call again." });
+      return false;
+    }
+    if (!msg.error && msg.result?.isError !== true) {
+      kernelLoaded = true;
+      return false;
+    }
+    shiftLines(msg);
+    return true;
+  }
+  return fresh && !kernelLoaded;
+}
+
+// A first call that does not even parse ("let x = ;") never starts the kernel: the kernel then
+// prints its documentation to the hidden check. It is held and shown with the next call's result.
+let heldDocs = null;
+const holdDocs = (reply) => {
+  const docs = (reply?.result?.content ?? []).filter((c) => typeof c?.text === "string" && c.text.startsWith("## Computer Use"));
+  if (docs.length) heldDocs = docs;
+};
+
+// The line numbers of a prefixed call's errors ("[722:8-722:9]: Unexpected token", "<anonymous>:722:8"),
+// counted from the call's own code.
+function shiftLines(msg) {
+  const shift = (t) =>
+    t
+      .replace(/\[(\d+):(\d+)-(\d+):(\d+)\]/g, (all, a, b, c, d) => (Number(a) > KERNEL_LINES ? `[${a - KERNEL_LINES}:${b}-${c - KERNEL_LINES}:${d}]` : all))
+      .replace(/(<anonymous>:)(\d+)(:\d+)/g, (all, p, l, r) => (Number(l) > KERNEL_LINES ? `${p}${l - KERNEL_LINES}${r}` : all));
+  for (const c of msg.result?.content ?? []) if (typeof c?.text === "string") c.text = shift(c.text);
+  if (typeof msg.error?.message === "string") msg.error.message = shift(msg.error.message);
+}
+
+async function ensureKernel() {
+  try {
+    const probe = await rpc.request(
+      "tools/call",
+      { name: "js", arguments: { code: "nodeRepl.write(typeof cuDecorate);", title: "puppet check" }, _meta: callMeta() },
+      30000,
+    );
+    holdDocs(probe);
+    if (resultTexts(probe).some((t) => t.trim() === "function")) kernelLoaded = true;
+    else await loadHelpers();
+  } catch (e) {
+    log(`kernel check failed: ${e.message}`);
+  }
+}
+
+// cua_repl prints its documentation once, on the first call of a new kernel, even when that call
+// fails (`getApp("Calculatrice")` → "Invalid app"); the kernel stays, so a failed first call counts.
 function freshKernel(msg) {
-  return HELPERS && msg.result && !msg.result.isError && resultTexts(msg).some((t) => t.startsWith("## Computer Use"));
+  return HELPERS && msg.result && resultTexts(msg).some((t) => t.startsWith("## Computer Use"));
 }
 
 // The variable the model last bound an app or tab to (`let app = await cua.getApp(...)`). Bindings
@@ -810,13 +943,18 @@ async function takeSnapshot() {
 }
 
 async function loadHelpers() {
+  // A tab is decorated as a new object, so the variable is assigned again (a const one stays as it was).
+  const adopt = [...kernelBindings].map((name) => `try { ${name} = await cuAdopt(${name}); } catch {}`).join("\n");
+  const code = KERNEL_CODE + (adopt && /\bconst cuAdopt\b/.test(KERNEL_CODE) ? `\n${adopt}` : "");
   try {
     const reply = await rpc.request(
       "tools/call",
-      { name: "js", arguments: { code: HELPERS_CODE, title: "puppet helpers" }, _meta: callMeta() },
+      { name: "js", arguments: { code, title: "puppet helpers" }, _meta: callMeta() },
       30000,
     );
+    if (!heldDocs) holdDocs(reply);
     if (reply.error || reply.result?.isError) log(`helpers not loaded: ${JSON.stringify(reply.error ?? reply.result.content)}`);
+    else kernelLoaded = true;
   } catch (e) {
     log(`helpers not loaded: ${e.message}`);
   }
@@ -916,6 +1054,9 @@ function startServer() {
 // Calls the old server never answered fail now so the client does not wait on them forever.
 async function restartServer(reason) {
   ready = false;
+  kernelLoaded = false;
+  prefixedCalls.clear();
+  heldDocs = null;
   for (const id of pendingCalls.keys()) {
     const error = { code: -32603, message: `${SERVER_NAME} restarted (${reason}); call the tool again` };
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error }) + "\n");

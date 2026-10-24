@@ -30,6 +30,7 @@ Claude:  (opens Mail, reads the inbox list)
 - **Works in Claude Code and Claude Desktop.** One MCP server, `puppet`, with the same two tools as Codex: `js` and `js_reset`.
 - **Clean turns.** When Claude finishes answering, Puppet ends the Computer Use turn: claimed tabs are released and the Computer Use pointer leaves your screen.
 - **Native permission dialogs.** Computer Use asks before it uses an app or a site. Puppet shows those requests as macOS dialogs instead of letting a headless host decline them silently, and can remember the apps you always allow.
+- **Actions that check themselves.** Puppet adds to Computer Use's `cua` API: elements targeted by selector (`click({ id: "Seven" })`, `click({ text: "Search", role: "button" })`), an explicit error for a stale element index instead of a click on another element, `typeText` that focuses the field and checks the text arrived, `tab.goto`, `waitFor` and `waitForIdle` instead of fixed delays, `tab.extractLinks` for clean `{ text, href }` lists, apps by their localized name, and one image per screenshot. Every original call keeps working; the first call of a kernel prints the additions after Codex's documentation.
 - **Resilient.** It follows ChatGPT updates on its own, restarts the runtime after a crash, cuts oversized outputs before they flood Claude's context, and adds a hint to common errors.
 - **Watch it work (optional).** A small menu bar app shows a live picture of the app being driven, in a floating picture-in-picture window, and disappears when Computer Use is idle.
 - **A skill for Claude.** Working habits that keep outputs small, avoid typing into your open documents and follow Codex's confirmation policy.
@@ -145,7 +146,7 @@ Set these variables before running `./install.sh`; they are saved into the MCP s
 | `PUPPET_MAX_OUTPUT_CHARS` | `80000` | Longer `js` results are cut; the full text goes to a private file in `$TMPDIR/puppet-output/` (kept one day) whose path ends the result. |
 | `PUPPET_SANDBOX` | on | `off` runs the `js` code without Codex's sandbox, as Codex does in `danger-full-access`. With the sandbox, that code sees the disk read-only and has no network; apps and tabs work either way. |
 | `PUPPET_DISABLE_ANALYTICS` | off | `1` stops `cua_repl`'s JavaScript from sending usage events to OpenAI. The Computer Use app's own events remain. |
-| `PUPPET_HELPERS` | on | `0` stops the server from declaring the `cuFind`, `cuLines` and `cuKey` helpers in each new kernel. |
+| `PUPPET_HELPERS` | on | `0` stops the server from declaring the `cuFind`, `cuLines`, `cuKey` and `cuQuery` helpers and its additions to the `cua` API (`puppet-kernel.js`, documented in `puppet-kernel.md`) in each new kernel. |
 | `PUPPET_SNAPSHOTS` | on | `0` stops the server from asking for a picture of the app after each action (used by the menu bar app). |
 | `PUPPET_NATIVE_PROMPTS` | on | `0` forwards permission prompts to the MCP client instead of showing a macOS dialog. |
 | `PUPPET_DATA_DIR` | `~/.claude/mcp` | Where `puppet-approvals.json` lives, for both the script and the plugin. |
@@ -183,7 +184,7 @@ npm test       # the server against a fake cua_repl, in temporary folders
 npm run doctor # checks a real install, read-only
 ```
 
-The tests never touch `~/.claude` or the real Computer Use service; they set `PUPPET_SKIP_SIGNATURE_CHECK=1`, which only makes sense with their fake server. They cover the pre-initialize probe, the turn metadata, idle and Stop-hook turn ends, crash restarts, plugin updates, the signature check, saved app approvals, snapshots and concurrent state-file writes.
+The tests never touch `~/.claude` or the real Computer Use service; they set `PUPPET_SKIP_SIGNATURE_CHECK=1`, which only makes sense with their fake server. `test/kernel.test.mjs` runs `puppet-kernel.js` against fake apps and tabs (a Calculator that renumbers its tree, a search page). The wrapper tests cover the pre-initialize probe, the turn metadata, idle and Stop-hook turn ends, crash restarts, plugin updates, the signature check, saved app approvals, snapshots and concurrent state-file writes.
 
 ## Uninstall
 
