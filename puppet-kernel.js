@@ -132,35 +132,68 @@ const __cuIsSelector = (t) => typeof t === "string" || (t != null && typeof t ==
 // An ID without the state some apps append to it ("StandardInputView;value:98").
 const __cuId = (id) => String(id ?? "").split(";")[0];
 
+// IDs some apps swap with the state, tried when the one asked for is absent: the Calculator's
+// AllClear button becomes Clear once a number is shown, and back.
+const __cuIdAliases = { allclear: ["clear"], clear: ["allclear"] };
+
+// Whether an element's ID is this one: equal without regard to case, with or without the state some
+// apps append. Only a RegExp matches part of an ID ({ id: /StandardInputView/ }).
+const __cuIdIs = (id, want) => {
+  if (!id) return false;
+  if (__cuIsRe(want)) return want.test(id);
+  const w = __cuNorm(String(want));
+  return __cuNorm(__cuId(id)) === w || __cuNorm(id) === w;
+};
+
+// Edit distance between two short strings, to name the IDs a mistyped one was close to.
+const __cuDistance = (a, b) => {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = row;
+  }
+  return prev[b.length];
+};
+
+// The elements whose ID is close to one that matched nothing: one or two letters off, or an ID that
+// contains it or that it contains. Only listed as candidates, never acted on.
+const __cuNearIds = (elements, want) => {
+  const w = __cuNorm(String(want));
+  return elements.filter((el) => {
+    const id = __cuNorm(__cuId(el.fields.ID));
+    if (id.length < 3) return false;
+    return __cuDistance(id, w) <= Math.min(2, Math.floor(w.length / 3)) || id.includes(w) || w.includes(id);
+  });
+};
+
 // The elements a selector matches, best first. Keys: id, text (anywhere in the line), name (its
 // name, description or value only), role, value, nth. A string is an ID, or else a text.
-// An ID that matches nothing exactly falls back to an ID that contains it or that it contains, when
-// only one does (the Calculator's AllClear button becomes Clear once a number is shown).
+// An ID matches only an equal ID (or a RegExp); an ID that matches nothing tries its known
+// aliases (__cuIdAliases), never an ID that merely contains it or that it contains.
 const cuMatch = (elements, selector) => {
   const sel = typeof selector === "string" ? { idOrText: selector } : selector;
-  const scored = [];
-  for (const el of elements) {
-    if (sel.role && !__cuHasRole(el, sel.role)) continue;
-    if (sel.id != null) {
-      const id = el.fields.ID;
-      if (!id || (__cuIsRe(sel.id) ? !sel.id.test(id) : __cuId(id) !== String(sel.id) && id !== String(sel.id))) continue;
+  const pass = (want) => {
+    const scored = [];
+    for (const el of elements) {
+      if (sel.role && !__cuHasRole(el, sel.role)) continue;
+      if (want != null && !__cuIdIs(el.fields.ID, want)) continue;
+      if (sel.value != null && !__cuNorm(el.fields.Value).includes(__cuNorm(sel.value))) continue;
+      let rank = 3;
+      if (sel.idOrText != null) rank = __cuIdIs(el.fields.ID, sel.idOrText) ? 4 : __cuRank(el, sel.idOrText, false);
+      if (sel.text != null) rank = Math.min(rank, __cuRank(el, sel.text, false));
+      if (sel.name != null) rank = Math.min(rank, __cuRank(el, sel.name, true));
+      if (rank > 0) scored.push({ el, rank });
     }
-    if (sel.value != null && !__cuNorm(el.fields.Value).includes(__cuNorm(sel.value))) continue;
-    let rank = 3;
-    if (sel.idOrText != null) rank = __cuId(el.fields.ID) === sel.idOrText ? 4 : __cuRank(el, sel.idOrText, false);
-    if (sel.text != null) rank = Math.min(rank, __cuRank(el, sel.text, false));
-    if (sel.name != null) rank = Math.min(rank, __cuRank(el, sel.name, true));
-    if (rank > 0) scored.push({ el, rank });
+    return scored.sort((a, b) => b.rank - a.rank).map((s) => ({ ...s.el, rank: s.rank }));
+  };
+  const found = pass(sel.id);
+  if (found.length || typeof sel.id !== "string") return found;
+  for (const alias of __cuIdAliases[__cuNorm(sel.id)] ?? []) {
+    const other = pass(alias);
+    if (other.length === 1) return [{ ...other[0], note: `no ID ${JSON.stringify(sel.id)}; used ID ${JSON.stringify(other[0].fields.ID)}` }];
   }
-  if (!scored.length && typeof sel.id === "string") {
-    const want = __cuNorm(sel.id);
-    const near = elements.filter((el) => {
-      const id = __cuNorm(__cuId(el.fields.ID));
-      return id.length > 2 && (id.includes(want) || want.includes(id)) && (!sel.role || __cuHasRole(el, sel.role));
-    });
-    if (near.length === 1) return [{ ...near[0], rank: 1, note: `no ID ${JSON.stringify(sel.id)}; used ID ${JSON.stringify(near[0].fields.ID)}` }];
-  }
-  return scored.sort((a, b) => b.rank - a.rank).map((s) => ({ ...s.el, rank: s.rank }));
+  return [];
 };
 
 const __cuDescribe = (sel) =>
@@ -245,7 +278,11 @@ const cuResolve = async (target, selector, purpose = "click") => {
   if (!found.length) {
     const key = typeof selector === "string" ? selector : selector.text ?? selector.name ?? selector.id ?? "";
     const words = __cuNorm(__cuIsRe(key) ? key.source : key).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 2);
-    const near = read.elements.filter((e) => (selector.role && __cuHasRole(e, selector.role)) || words.some((w) => __cuNorm(e.body).includes(w)));
+    const nearIds = typeof selector === "object" && typeof selector.id === "string" ? __cuNearIds(read.elements, selector.id) : [];
+    const near = [
+      ...nearIds,
+      ...read.elements.filter((e) => !nearIds.includes(e) && ((selector.role && __cuHasRole(e, selector.role)) || words.some((w) => __cuNorm(e.body).includes(w)))),
+    ];
     throw new Error(
       `[puppet] No element matches ${__cuDescribe(selector)} in the current snapshot (#${n}, ${read.elements.length} elements).` +
         (near.length ? ` Close candidates:\n${__cuList(near)}` : " Read the tree with getAXState({ full: true }) to see what is there."),

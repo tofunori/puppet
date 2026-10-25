@@ -2,7 +2,7 @@
 
 Puppet adds the following to `cua`, apps and tabs from your **second** `js` call in a kernel on. Every original signature keeps working.
 
-**Selectors instead of indices.** `click`, `typeText`, `setValue`, `selectText`, `performSecondaryAction` (and `pressKey` in a tab) take a selector wherever they take an element index. It is resolved on a fresh tree at call time, so you never need to read indices by hand. Keys: `id` (the `ID:` field), `text` (anywhere in the line), `name` (name, description or value only, string or RegExp), `role` (English or the tree's language: "button", "text field", "link"…), `value`, `nth`, `timeout` (ms to wait for it to appear, default 3000). A plain string is an ID, or else a text. No match, or several equally good ones, fails with the candidates listed.
+**Selectors instead of indices.** `click`, `typeText`, `setValue`, `selectText`, `performSecondaryAction` (and `pressKey` in a tab) take a selector wherever they take an element index. It is resolved on a fresh tree at call time, so you never need to read indices by hand. Keys: `id` (the `ID:` field, equal without regard to case; part of an ID only with a RegExp: `{ id: /StandardInputView/ }`), `text` (anywhere in the line), `name` (name, description or value only, string or RegExp), `role` (English or the tree's language: "button", "text field", "link"…), `value`, `nth`, `timeout` (ms to wait for it to appear, default 3000). A plain string is an ID, or else a text. No match, or several equally good ones, fails with the candidates listed.
 ```javascript
 await app.click({ id: "Seven" });
 await tab.click({ text: "Rechercher", role: "button" });
@@ -32,7 +32,7 @@ await tab.waitFor({ text: "articles" }, { timeout: 15000 });
 await app.waitForIdle();
 ```
 
-**Clicks at coordinates** return what they hit: in a tab `{ clicked: [x, y], hit: { tag, role, text, href } }` (tab coordinates are CSS pixels, as in its screenshots); in an app, `{ clicked, changes }` with the first lines of the tree diff. Check it before going on. Clicks by index or selector return `{ clicked: index, element: "<its line>" }`.
+**Clicks at coordinates** return what they hit: in a tab `{ clicked: [x, y], hit: { tag, role, text, href } }` (tab coordinates are CSS pixels, as in its screenshots); in an app, `{ clicked, hit: null, changes }` with the first lines of the tree diff: the app API gives no element positions, so it cannot say which element was under the point. Check it before going on. Clicks by index or selector return `{ clicked: index, element: "<its line>" }`.
 
 **Links from a page.** `tab.extractLinks({ match: /\$ CAN/, limit: 200, strip: [/extra noise/] })` returns `[{ text, href }]`, one per URL, read from the page: full URLs, visible text without markup, swatches, "+4" or "quick view" noise.
 ```javascript
