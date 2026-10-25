@@ -37,6 +37,7 @@ function calculator() {
   const keys = [
     ["Tout effacer", "AllClear"],
     ["7", "Seven"],
+    ["9", "Nine"],
     ["6", "Six"],
     ["Multiplier", "Multiply"],
     ["Égal", "Equals"],
@@ -45,6 +46,7 @@ function calculator() {
     const out = ['Window: "Calculatrice", App: Calculatrice.', "0 fenêtre standard Calculatrice, ID: main, Secondary Actions: Raise"];
     const els = [];
     if (calc.display !== "0") els.push({ line: "texte Description: Dernière expression, Value: 1" });
+    els.push({ line: `zone de défilement ID: StandardInputView;value:${calc.display}, Secondary Actions: Copier` });
     els.push({ line: `texte Description: Modifier le champ, Value: ${calc.display}` });
     for (const [desc, id] of keys) {
       const shownId = id === "AllClear" && calc.display !== "0" ? "Clear" : id;
@@ -107,6 +109,43 @@ test("acceptance 1: the Calculator by ID only shows 42", async () => {
   assert.match(first.note, /used ID "Clear"/);
   for (const id of ["AllClear", "Seven", "Multiply", "Six", "Equals"]) await app.click({ id });
   assert.equal(calc.display, "42");
+});
+
+test("an ID matches only an equal ID, without regard to case; part of an ID only with a RegExp", async () => {
+  const { app } = calculator();
+  const k = kernel({});
+  k.cuDecorate(app);
+  const ids = async (sel) => plain((await k.cuQuery(app, sel)).map((e) => e.fields.ID));
+  assert.deepEqual(await ids({ id: "Seven" }), ["Seven"]);
+  assert.deepEqual(await ids({ id: "seven" }), ["Seven"]);
+  assert.deepEqual(await ids({ id: /Standard/ }), ["StandardInputView;value:0"]);
+  assert.deepEqual(await ids({ id: "StandardInputView" }), ["StandardInputView;value:0"]);
+  assert.deepEqual(await ids({ id: "Sevenn" }), [], "a query that contains an ID does not match it");
+  assert.deepEqual(await ids({ id: "BoutonInexistant" }), [], "boutoninexistant contains nine, but is not Nine");
+  assert.deepEqual(await ids({ id: "Seve" }), [], "an ID that contains the query does not match it either");
+  assert.deepEqual(await ids({ id: "Zzzz" }), []);
+});
+
+test("a mistyped ID fails and names the close ID as a candidate, without clicking it", async () => {
+  const { app, calc } = calculator();
+  const k = kernel({});
+  k.cuDecorate(app);
+  await rejectsWith(app.click({ id: "Sevenn", timeout: 0 }), /No element matches \{ id: "Sevenn", timeout: 0 \}[\s\S]*Close candidates:[\s\S]*ID: Seven\b/);
+  await rejectsWith(app.click({ id: "BoutonInexistant", timeout: 0 }), /^\[puppet\] No element matches \{ id: "BoutonInexistant"/);
+  assert.deepEqual(calc.clicks, [], "nothing was clicked");
+  await app.click({ id: "Seven" });
+  assert.deepEqual(calc.clicks, ["Seven"]);
+});
+
+test("waitFor an ID that does not exist times out instead of matching an ID it contains", async () => {
+  const { app } = calculator();
+  const k = kernel({});
+  k.cuDecorate(app);
+  const t0 = Date.now();
+  await rejectsWith(app.waitFor({ id: "BoutonInexistant" }, { timeout: 500, interval: 100 }), /waitFor \{ id: "BoutonInexistant" \} timed out after 500 ms/);
+  assert.ok(Date.now() - t0 >= 500);
+  const ok = plain(await app.waitFor({ id: "Nine" }, { timeout: 500 }));
+  assert.match(ok.element, /ID: Nine/);
 });
 
 test("acceptance 6: a stale index fails with the explicit message instead of clicking another element", async () => {
