@@ -853,14 +853,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let visible = recent || menuPanel?.isVisible == true || Date() < revealUntil
         if statusItem.isVisible != visible { statusItem.isVisible = visible }
         guard visible, let button = statusItem.button else { return }
-        // A plain template arrow in the menu bar's own color; rays are added while puppet acts.
+        // A plain template arrow in the menu bar's own color; rays are added for the whole turn, as long
+        // as the floating window shows it: actions often last under a second, and rays shown only then
+        // left the plain arrow while the window showed puppet at work.
+        let working = model.busy || model.turnActive
         let state = "\(model.busy)/\(model.turnActive)/\(model.busySession?.action ?? "")"
         if state == iconState { return }
         iconState = state
-        let image = NSImage(systemSymbolName: model.busy ? "cursorarrow.rays" : "cursorarrow", accessibilityDescription: "Puppet")
+        let image = NSImage(systemSymbolName: working ? "cursorarrow.rays" : "cursorarrow", accessibilityDescription: "Puppet")
         image?.isTemplate = true
         button.image = image
-        button.alphaValue = model.busy || model.turnActive ? 1.0 : 0.6
+        button.alphaValue = working ? 1.0 : 0.6
         button.toolTip = model.busy
             ? tr("Puppet is acting: ", "Puppet agit : ") + (model.busySession?.action ?? "")
             : model.turnActive ? tr("Puppet: turn in progress", "Puppet : tour en cours") : tr("Puppet: idle", "Puppet : au repos")
