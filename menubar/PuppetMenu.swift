@@ -32,6 +32,7 @@ struct SessionEntry: Decodable, Identifiable {
     let since: String?
     let snapshot: String?
     let snapshotAt: String?
+    let snapshotApp: String? // the app the snapshot shows; older wrappers leave it out
     let stopped: Bool?
     let tab: String? // the browser tab a browser call last worked in
     var id: Int32 { pid }
@@ -168,8 +169,11 @@ func frontmost(_ windows: [SCWindow]) -> SCWindow? {
 func latestServiceScreenshot(of target: String) -> NSImage? {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("com.openai.sky.CUAService")
     guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
-    let wanted = target == "browser" ? nil : target.lowercased()
-    let jpegs = files.filter { $0.pathExtension == "jpeg" && (wanted == nil || $0.lastPathComponent.lowercased().hasPrefix(wanted!)) }
+    // Its pictures are named after the app. None names the tabs of the extension, and the newest of
+    // all was the app driven before (the Calculator while Claude browsed).
+    guard target != "browser" else { return nil }
+    let wanted = target.lowercased()
+    let jpegs = files.filter { $0.pathExtension == "jpeg" && $0.lastPathComponent.lowercased().hasPrefix(wanted) }
     let newest = jpegs.max { a, b in
         let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
         let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -217,6 +221,7 @@ final class Model: ObservableObject {
     private var lastStamp = ""
     private var lastFullRead = Date.distantPast
     private var capturing: Set<String> = []
+    private var shownApps: [String: String] = [:] // by session id: the app its picture is of
 
     var busy: Bool { sessions.contains { $0.busy == true } }
     var turnActive: Bool { sessions.contains { $0.turnActive == true } }
@@ -270,7 +275,8 @@ final class Model: ObservableObject {
                let state = try? decoder.decode(StateFile.self, from: data) {
                 let alive = state.entries.filter { isAlive($0.pid) }
                 live += alive
-                for entry in alive {
+                // Only a snapshot of the app the session works on now.
+                for entry in alive where entry.snapshotApp == nil || entry.snapshotApp == entry.app {
                     if let name = entry.snapshot, let at = entry.snapshotAt {
                         snapshots[entry.session_id] = (dir.appendingPathComponent(name), at)
                     }
@@ -286,6 +292,14 @@ final class Model: ObservableObject {
         recent = Array(lines.sorted { $0.t > $1.t }.prefix(40))
         snapshotFiles = snapshots
         if let id = pickedSession, !live.contains(where: { $0.session_id == id }) { pickedSession = nil }
+        // A session that moved to another app drops the picture of the previous one.
+        for entry in live where entry.app != nil && shownApps[entry.session_id] != entry.app {
+            if shownApps[entry.session_id] != nil {
+                previews[entry.session_id] = nil
+                shownSnapshots[entry.session_id] = nil
+            }
+            shownApps[entry.session_id] = entry.app
+        }
         previews = previews.filter { id, _ in live.contains { $0.session_id == id } }
     }
 

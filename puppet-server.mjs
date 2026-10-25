@@ -219,21 +219,26 @@ function appOf(code = "") {
   return lastApp;
 }
 const BROWSER_IDS = new Set(["chrome", "edge", "iab", "dot"]);
-// Every variable an app or tab is bound to in this kernel. The first call of a kernel binds one
-// before Puppet's additions exist; loading them then decorates it in place.
-const BINDING_RE = /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
+// Every variable an app or tab is bound to in this kernel, declared or assigned again
+// (`tab = await cua.createBrowserTab(...)`). The first call of a kernel binds one before Puppet's
+// additions exist; loading them then decorates it in place.
+const BINDING_RE = /(?:(?:let|const|var)\s+|(?<![\w$.]))([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
 const kernelBindings = new Set();
 
 function activityStart(id, params) {
   const code = params?.arguments?.code ?? "";
   const title = params?.arguments?.title || (params?.name === "js_reset" ? "Reset the kernel" : code.split("\n")[0].slice(0, 80));
   const entry = { title, app: params?.name === "js" ? appOf(code) : lastApp, t0: Date.now() };
-  const binding = [
-    ...code.matchAll(
-      /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g,
-    ),
-  ].at(-1);
-  if (binding) targetBinding = binding[1];
+  const binding = [...code.matchAll(BINDING_RE)].at(-1);
+  if (binding) {
+    targetBinding = binding[1];
+    targetApp = entry.app;
+  } else if (targetBinding && params?.name === "js" && entry.app !== targetApp) {
+    // The call works on another app or the browser without a binding we can read: the bound target
+    // is no longer what the user watches, so its picture goes rather than staying on screen.
+    targetBinding = null;
+    dropSnapshot();
+  }
   for (const m of code.matchAll(BINDING_RE)) kernelBindings.add(m[1]);
   callsInFlight.set(id, entry);
   updateEntry({ busy: true, turnActive: true, action: entry.title, app: entry.app, since: new Date(entry.t0).toISOString() });
@@ -918,6 +923,7 @@ function freshKernel(msg) {
 // carry between calls, so a hidden call can ask that target for a screenshot without printing its
 // accessibility tree again. A kernel reset drops them.
 let targetBinding = null;
+let targetApp = null; // the app or "browser" the binding was made for, as appOf names it
 let snapshotInFlight = false;
 const SNAPSHOT_FILE = path.join(path.dirname(STATE_FILE), `puppet-snapshot-${process.pid}.img`);
 
@@ -926,9 +932,13 @@ async function takeSnapshot() {
   // turn id: a snapshot then would open a Computer Use turn nobody ends, and its cursor would stay.
   if (!SNAPSHOTS || !targetBinding || snapshotInFlight || !rpc || !turnUsed) return;
   snapshotInFlight = true;
-  const code = `{ const __cuShot = await ${targetBinding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
+  const binding = targetBinding;
+  const app = targetApp;
+  const code = `{ const __cuShot = await ${binding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
   try {
     const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, 8000);
+    // A call that moved to another target while the picture was taken: it shows the old one.
+    if (targetBinding !== binding || targetApp !== app) return;
     const image = (reply.result?.content ?? []).find((c) => c?.type === "image" && c.data);
     if (!image) {
       targetBinding = null; // not an app or tab, or gone: wait for the next getApp/getTab
@@ -937,12 +947,21 @@ async function takeSnapshot() {
     const tmp = `${SNAPSHOT_FILE}.tmp`;
     fs.writeFileSync(tmp, Buffer.from(image.data, "base64"), { mode: 0o600 });
     fs.renameSync(tmp, SNAPSHOT_FILE);
-    updateEntry({ snapshot: path.basename(SNAPSHOT_FILE), snapshotAt: new Date().toISOString() });
+    updateEntry({ snapshot: path.basename(SNAPSHOT_FILE), snapshotAt: new Date().toISOString(), snapshotApp: app });
   } catch (e) {
     log(`snapshot failed: ${e.message}`);
   } finally {
     snapshotInFlight = false;
   }
+}
+
+// The menu bar app shows the session's snapshot for its current app; one of an earlier app would
+// stay on screen (the Calculator while Claude browses).
+function dropSnapshot() {
+  try {
+    fs.unlinkSync(SNAPSHOT_FILE);
+  } catch {}
+  updateEntry({ snapshot: null, snapshotAt: null, snapshotApp: null });
 }
 
 async function loadHelpers() {
