@@ -326,6 +326,9 @@ final class Model: ObservableObject {
         Task {
             let result = await captureWindow(of: target)
             await MainActor.run {
+                self.capturing.remove(id)
+                // A capture that returns after the session moved to another app is of the old one.
+                guard self.shownApps[id] == target else { return }
                 self.noteSource(result, target: target)
                 switch result {
                 case .image(let image):
@@ -337,7 +340,6 @@ final class Model: ObservableObject {
                     self.canRecordScreen = false
                     self.showSnapshot(of: entry)
                 }
-                self.capturing.remove(id)
             }
         }
     }
