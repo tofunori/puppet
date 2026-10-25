@@ -820,9 +820,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
         // or always when pinned. Without a picture to show (the tab was closed), it shows only while
         // puppet acts: an empty frame between actions or after the turn says nothing.
+        // A tab has no picture until the call that opens it returns: the window waits for it rather
+        // than showing an empty frame after the app driven before.
         let empty = model.preview == nil && !model.splitShown
         let linger: TimeInterval = model.phase == .stopped ? 2 : empty ? 0 : 10
-        let inTurn = model.busy || (model.turnActive && !empty)
+        let inTurn = (model.busy && !(empty && model.target == "browser")) || (model.turnActive && !empty)
         var showFloating = model.floatingPinned || (model.floatingEnabled && (inTurn || Date().timeIntervalSince(lastActive) < linger))
         // Hidden while the user is in the app they opened from it; back when they leave that app.
         if let pid = hiddenForApp {
