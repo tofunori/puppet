@@ -32,6 +32,7 @@ struct SessionEntry: Decodable, Identifiable {
     let since: String?
     let snapshot: String?
     let snapshotAt: String?
+    let snapshotApp: String? // the app the snapshot shows; older wrappers leave it out
     let stopped: Bool?
     let tab: String? // the browser tab a browser call last worked in
     var id: Int32 { pid }
@@ -168,8 +169,11 @@ func frontmost(_ windows: [SCWindow]) -> SCWindow? {
 func latestServiceScreenshot(of target: String) -> NSImage? {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("com.openai.sky.CUAService")
     guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
-    let wanted = target == "browser" ? nil : target.lowercased()
-    let jpegs = files.filter { $0.pathExtension == "jpeg" && (wanted == nil || $0.lastPathComponent.lowercased().hasPrefix(wanted!)) }
+    // Its pictures are named after the app. None names the tabs of the extension, and the newest of
+    // all was the app driven before (the Calculator while Claude browsed).
+    guard target != "browser" else { return nil }
+    let wanted = target.lowercased()
+    let jpegs = files.filter { $0.pathExtension == "jpeg" && $0.lastPathComponent.lowercased().hasPrefix(wanted) }
     let newest = jpegs.max { a, b in
         let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
         let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -217,6 +221,7 @@ final class Model: ObservableObject {
     private var lastStamp = ""
     private var lastFullRead = Date.distantPast
     private var capturing: Set<String> = []
+    private var shownApps: [String: String] = [:] // by session id: the app its picture is of
 
     var busy: Bool { sessions.contains { $0.busy == true } }
     var turnActive: Bool { sessions.contains { $0.turnActive == true } }
@@ -270,7 +275,8 @@ final class Model: ObservableObject {
                let state = try? decoder.decode(StateFile.self, from: data) {
                 let alive = state.entries.filter { isAlive($0.pid) }
                 live += alive
-                for entry in alive {
+                // Only a snapshot of the app the session works on now.
+                for entry in alive where entry.snapshotApp == nil || entry.snapshotApp == entry.app {
                     if let name = entry.snapshot, let at = entry.snapshotAt {
                         snapshots[entry.session_id] = (dir.appendingPathComponent(name), at)
                     }
@@ -286,6 +292,14 @@ final class Model: ObservableObject {
         recent = Array(lines.sorted { $0.t > $1.t }.prefix(40))
         snapshotFiles = snapshots
         if let id = pickedSession, !live.contains(where: { $0.session_id == id }) { pickedSession = nil }
+        // A session that moved to another app drops the picture of the previous one.
+        for entry in live where entry.app != nil && shownApps[entry.session_id] != entry.app {
+            if shownApps[entry.session_id] != nil {
+                previews[entry.session_id] = nil
+                shownSnapshots[entry.session_id] = nil
+            }
+            shownApps[entry.session_id] = entry.app
+        }
         previews = previews.filter { id, _ in live.contains { $0.session_id == id } }
     }
 
@@ -312,6 +326,9 @@ final class Model: ObservableObject {
         Task {
             let result = await captureWindow(of: target)
             await MainActor.run {
+                self.capturing.remove(id)
+                // A capture that returns after the session moved to another app is of the old one.
+                guard self.shownApps[id] == target else { return }
                 self.noteSource(result, target: target)
                 switch result {
                 case .image(let image):
@@ -323,7 +340,6 @@ final class Model: ObservableObject {
                     self.canRecordScreen = false
                     self.showSnapshot(of: entry)
                 }
-                self.capturing.remove(id)
             }
         }
     }
@@ -806,9 +822,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The floating window shows for the whole turn and 10 s after it (2 s after the stop button),
         // or always when pinned. Without a picture to show (the tab was closed), it shows only while
         // puppet acts: an empty frame between actions or after the turn says nothing.
+        // A tab has no picture until the call that opens it returns: the window waits for it rather
+        // than showing an empty frame after the app driven before.
         let empty = model.preview == nil && !model.splitShown
         let linger: TimeInterval = model.phase == .stopped ? 2 : empty ? 0 : 10
-        let inTurn = model.busy || (model.turnActive && !empty)
+        let inTurn = (model.busy && !(empty && model.target == "browser")) || (model.turnActive && !empty)
         var showFloating = model.floatingPinned || (model.floatingEnabled && (inTurn || Date().timeIntervalSince(lastActive) < linger))
         // Hidden while the user is in the app they opened from it; back when they leave that app.
         if let pid = hiddenForApp {
@@ -837,14 +855,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let visible = recent || menuPanel?.isVisible == true || Date() < revealUntil
         if statusItem.isVisible != visible { statusItem.isVisible = visible }
         guard visible, let button = statusItem.button else { return }
-        // A plain template arrow in the menu bar's own color; rays are added while puppet acts.
+        // A plain template arrow in the menu bar's own color; rays are added for the whole turn, as long
+        // as the floating window shows it: actions often last under a second, and rays shown only then
+        // left the plain arrow while the window showed puppet at work.
+        let working = model.busy || model.turnActive
         let state = "\(model.busy)/\(model.turnActive)/\(model.busySession?.action ?? "")"
         if state == iconState { return }
         iconState = state
-        let image = NSImage(systemSymbolName: model.busy ? "cursorarrow.rays" : "cursorarrow", accessibilityDescription: "Puppet")
+        let image = NSImage(systemSymbolName: working ? "cursorarrow.rays" : "cursorarrow", accessibilityDescription: "Puppet")
         image?.isTemplate = true
         button.image = image
-        button.alphaValue = model.busy || model.turnActive ? 1.0 : 0.6
+        button.alphaValue = working ? 1.0 : 0.6
         button.toolTip = model.busy
             ? tr("Puppet is acting: ", "Puppet agit : ") + (model.busySession?.action ?? "")
             : model.turnActive ? tr("Puppet: turn in progress", "Puppet : tour en cours") : tr("Puppet: idle", "Puppet : au repos")

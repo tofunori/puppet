@@ -471,6 +471,55 @@ test("follows a browser tab claimed from the user", async () => {
   await s.close();
 });
 
+test("drops the picture of an app once the session browses without a binding it can follow", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.request("tools/call", { name: "js", arguments: { code: 'let app = await cua.getApp("Calculatrice");' } });
+  const entry = await waitFor(() => ctx.state().find((e) => e.snapshot));
+  assert.equal(entry.snapshotApp, "Calculatrice");
+  const file = path.join(path.dirname(ctx.stateFile), entry.snapshot);
+  await waitFor(() => ctx.events().some((e) => e.arguments?.title === "puppet snapshot"));
+  const shots = () => ctx.events().filter((e) => e.arguments?.title === "puppet snapshot").length;
+  const before = shots();
+  await s.request("tools/call", { name: "js", arguments: { code: 'await cua.listTabs({ browser: "chrome" });' } });
+  const after = await waitFor(() => ctx.state().find((e) => e.app === "browser" && !e.snapshot));
+  assert.equal(after.snapshotApp, null);
+  assert.ok(!fs.existsSync(file), "the Calculator picture is gone");
+  await sleep(200);
+  assert.equal(shots(), before, "no more pictures of the Calculator");
+  await s.close();
+});
+
+test("follows a tab assigned to a variable again", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  await s.request("tools/call", { name: "js", arguments: { code: 'let app = await cua.getApp("Calculatrice"); let tab;' } });
+  await s.request("tools/call", { name: "js", arguments: { code: 'tab = await cua.createBrowserTab("chrome", "https://example.com/");' } });
+  const shot = await waitFor(() => ctx.events().filter((e) => e.arguments?.title === "puppet snapshot").find((e) => /tab\.getScreenshot/.test(e.arguments.code)));
+  assert.ok(shot);
+  assert.equal((await waitFor(() => ctx.state().find((e) => e.snapshotApp === "browser"))).app, "browser");
+  await s.close();
+});
+
+test("follows an app used again through the variable bound to it", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  const shots = () => ctx.events().filter((e) => e.arguments?.title === "puppet snapshot");
+  await s.request("tools/call", { name: "js", arguments: { code: 'let app = await cua.getApp("Calculatrice");' } });
+  await waitFor(() => shots().length === 1);
+  await s.request("tools/call", { name: "js", arguments: { code: 'let te = await cua.getApp("TextEdit");' } });
+  await waitFor(() => shots().length === 2 && /te\.getScreenshot/.test(shots()[1].arguments.code));
+  await s.request("tools/call", { name: "js", arguments: { code: 'await app.pressKey("8");' } });
+  const shot = await waitFor(() => shots()[2]);
+  assert.match(shot.arguments.code, /await app\.getScreenshot/);
+  const entry = await waitFor(() => ctx.state().find((e) => e.snapshotApp === "Calculatrice" && e.app === "Calculatrice"));
+  assert.ok(entry);
+  await s.close();
+});
+
 test("keeps the state file whole when many wrappers start at once", async () => {
   const ctx = setup();
   const sessions = Array.from({ length: 8 }, () => connect(ctx));

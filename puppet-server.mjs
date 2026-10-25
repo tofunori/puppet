@@ -203,8 +203,19 @@ let lastApp = null;
 let appendsSinceTrim = 0;
 
 // The app or browser a call works on, read from the code: getApp("…"), createBrowserTab("…"),
-// getTab(…, { browser: "…" }). Otherwise the last one this session named.
+// getTab(…, { browser: "…" }). Otherwise the app of the bound variable it uses (`app.pressKey(…)`
+// after `let app = await cua.getApp("Calculatrice")`), else the last one this session named.
 function appOf(code = "") {
+  const named = namedApp(code);
+  if (named) lastApp = named;
+  else {
+    const used = usedBinding(code);
+    if (used) lastApp = bindingApps.get(used);
+  }
+  return lastApp;
+}
+
+function namedApp(code) {
   const app = /getApp\(\s*["'`]([^"'`]+)["'`]/.exec(code);
   // A browser named by its id is a browser whatever the id: "chrome", or "1" and "2" when the
   // extension runs in two Chromium browsers (Chrome and Vivaldi), so the menu bar app keeps it behind.
@@ -212,29 +223,50 @@ function appOf(code = "") {
     /createBrowserTab\(\s*["'`]([^"'`]+)["'`]/.exec(code) ??
     /getBrowser\(\s*\{[^}]*\bid:\s*["'`]([^"'`]+)["'`]/.exec(code) ??
     /browser:\s*["'`]([^"'`]+)["'`]/.exec(code);
-  if (app) lastApp = BROWSER_IDS.has(app[1]) ? "browser" : app[1];
-  else if (browser) lastApp = "browser";
+  if (app) return BROWSER_IDS.has(app[1]) ? "browser" : app[1];
+  if (browser) return "browser";
   // Tabs reached through a browser binding: user.claimTab, tabs.get/new/selected, getTab.
-  else if (/\.user\.(claimTab|openTabs)\(|\.tabs\.(get|new|selected|list)\(|cua\.getTab\(/.test(code)) lastApp = "browser";
-  return lastApp;
+  if (/\.user\.(claimTab|openTabs)\(|\.tabs\.(get|new|selected|list)\(|cua\.getTab\(/.test(code)) return "browser";
+  return null;
+}
+
+// The bound app or tab variable the code uses last (`te.click(…)`), if any.
+function usedBinding(code) {
+  let last = null;
+  for (const m of code.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\./g)) if (bindingApps.has(m[1])) last = m[1];
+  return last;
 }
 const BROWSER_IDS = new Set(["chrome", "edge", "iab", "dot"]);
-// Every variable an app or tab is bound to in this kernel. The first call of a kernel binds one
-// before Puppet's additions exist; loading them then decorates it in place.
-const BINDING_RE = /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
+// Every variable an app or tab is bound to in this kernel, declared or assigned again
+// (`tab = await cua.createBrowserTab(...)`). The first call of a kernel binds one before Puppet's
+// additions exist; loading them then decorates it in place.
+const BINDING_RE = /(?:(?:let|const|var)\s+|(?<![\w$.]))([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g;
 const kernelBindings = new Set();
+const bindingApps = new Map(); // bound variable -> the app or "browser" it was bound to
 
 function activityStart(id, params) {
   const code = params?.arguments?.code ?? "";
   const title = params?.arguments?.title || (params?.name === "js_reset" ? "Reset the kernel" : code.split("\n")[0].slice(0, 80));
   const entry = { title, app: params?.name === "js" ? appOf(code) : lastApp, t0: Date.now() };
-  const binding = [
-    ...code.matchAll(
-      /(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+(?:cua\.(?:getApp|getTab|createBrowserTab)|[A-Za-z_$][\w$.]*\.(?:user\.claimTab|tabs\.(?:get|new|selected)))\(/g,
-    ),
-  ].at(-1);
-  if (binding) targetBinding = binding[1];
-  for (const m of code.matchAll(BINDING_RE)) kernelBindings.add(m[1]);
+  const binding = [...code.matchAll(BINDING_RE)].at(-1);
+  const used = params?.name === "js" && !binding && !namedApp(code) ? usedBinding(code) : null;
+  if (binding) {
+    targetBinding = binding[1];
+    targetApp = entry.app;
+  } else if (used) {
+    // Back to a target bound earlier: the pictures follow it again.
+    targetBinding = used;
+    targetApp = entry.app;
+  } else if (targetBinding && params?.name === "js" && entry.app !== targetApp) {
+    // The call works on another app or the browser without a binding we can read: the bound target
+    // is no longer what the user watches, so its picture goes rather than staying on screen.
+    targetBinding = null;
+    dropSnapshot();
+  }
+  for (const m of code.matchAll(BINDING_RE)) {
+    kernelBindings.add(m[1]);
+    if (params?.name === "js") bindingApps.set(m[1], entry.app);
+  }
   callsInFlight.set(id, entry);
   updateEntry({ busy: true, turnActive: true, action: entry.title, app: entry.app, since: new Date(entry.t0).toISOString() });
 }
@@ -705,6 +737,7 @@ function forwardToClient(line, msg) {
     if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
       targetBinding = null;
       kernelBindings.clear();
+      bindingApps.clear();
       kernelLoaded = false;
     }
     else if (tool === "js" && !check && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
@@ -918,6 +951,7 @@ function freshKernel(msg) {
 // carry between calls, so a hidden call can ask that target for a screenshot without printing its
 // accessibility tree again. A kernel reset drops them.
 let targetBinding = null;
+let targetApp = null; // the app or "browser" the binding was made for, as appOf names it
 let snapshotInFlight = false;
 const SNAPSHOT_FILE = path.join(path.dirname(STATE_FILE), `puppet-snapshot-${process.pid}.img`);
 
@@ -926,9 +960,13 @@ async function takeSnapshot() {
   // turn id: a snapshot then would open a Computer Use turn nobody ends, and its cursor would stay.
   if (!SNAPSHOTS || !targetBinding || snapshotInFlight || !rpc || !turnUsed) return;
   snapshotInFlight = true;
-  const code = `{ const __cuShot = await ${targetBinding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
+  const binding = targetBinding;
+  const app = targetApp;
+  const code = `{ const __cuShot = await ${binding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
   try {
     const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, 8000);
+    // A call that moved to another target while the picture was taken: it shows the old one.
+    if (targetBinding !== binding || targetApp !== app) return;
     const image = (reply.result?.content ?? []).find((c) => c?.type === "image" && c.data);
     if (!image) {
       targetBinding = null; // not an app or tab, or gone: wait for the next getApp/getTab
@@ -937,12 +975,21 @@ async function takeSnapshot() {
     const tmp = `${SNAPSHOT_FILE}.tmp`;
     fs.writeFileSync(tmp, Buffer.from(image.data, "base64"), { mode: 0o600 });
     fs.renameSync(tmp, SNAPSHOT_FILE);
-    updateEntry({ snapshot: path.basename(SNAPSHOT_FILE), snapshotAt: new Date().toISOString() });
+    updateEntry({ snapshot: path.basename(SNAPSHOT_FILE), snapshotAt: new Date().toISOString(), snapshotApp: app });
   } catch (e) {
     log(`snapshot failed: ${e.message}`);
   } finally {
     snapshotInFlight = false;
   }
+}
+
+// The menu bar app shows the session's snapshot for its current app; one of an earlier app would
+// stay on screen (the Calculator while Claude browses).
+function dropSnapshot() {
+  try {
+    fs.unlinkSync(SNAPSHOT_FILE);
+  } catch {}
+  updateEntry({ snapshot: null, snapshotAt: null, snapshotApp: null });
 }
 
 async function loadHelpers() {
