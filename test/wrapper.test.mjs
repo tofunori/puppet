@@ -160,6 +160,40 @@ test("an idle turn ends in cua_repl and in the Computer Use service", async () =
   await s.close();
 });
 
+test("a call Claude Code cancels (Esc) ends the turn at once, and again when it runs to its end", async () => {
+  const ctx = setup();
+  const s = connect(ctx);
+  await s.init();
+  s.send({ id: 41, method: "tools/call", params: { name: "js", arguments: { code: "runon" } } });
+  const call = await waitFor(() => ctx.events().find((e) => e.arguments?.code === "runon"));
+  const { turn_id } = sessionOf(call);
+  await waitFor(() => ctx.state().some((e) => e.busy === true));
+  s.send({ method: "notifications/cancelled", params: { requestId: 41, reason: "user interrupted" } });
+  // No Stop hook runs after an interrupt, and the idle minute has not passed: the cancel ends it.
+  await waitFor(() => ctx.skyPayloads().filter((p) => p["turn-id"] === turn_id).length >= 1);
+  await waitFor(() => ctx.events().some((e) => e.name === "turn_ended" && e.arguments.turn_id === turn_id));
+  await waitFor(() => ctx.state().some((e) => e.busy === false && e.turnActive === false));
+  // The service ran the call to its end after the cancel: its turn is ended once more for the cursor.
+  await waitFor(() => ctx.skyPayloads().filter((p) => p["turn-id"] === turn_id).length >= 2);
+  const next = await s.call("after");
+  assert.equal(next.result.content[0].text, "ok");
+  assert.notEqual(sessionOf(ctx.events().find((e) => e.arguments?.code === "after")).turn_id, turn_id);
+  await s.close();
+});
+
+test("a call that never gets an answer does not keep the turn and its cursor forever", async () => {
+  const ctx = setup();
+  const s = connect(ctx, { env: { PUPPET_MAX_CALL_MS: "300" } });
+  await s.init();
+  s.send({ id: 42, method: "tools/call", params: { name: "js", arguments: { code: "hang" } } });
+  const call = await waitFor(() => ctx.events().find((e) => e.arguments?.code === "hang"));
+  const { turn_id } = sessionOf(call);
+  const sky = await waitFor(() => ctx.skyPayloads().find((p) => p["turn-id"] === turn_id));
+  assert.equal(sky.type, "agent-turn-complete");
+  await waitFor(() => ctx.state().some((e) => e.busy === false && e.turnActive === false));
+  await s.close();
+});
+
 test("the Stop hook ends the turn of its own session only", async () => {
   const ctx = setup();
   const mine = connect(ctx);

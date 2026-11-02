@@ -14,6 +14,10 @@
 //   so the cursor goes away as soon as Claude finishes answering.
 // - Also ends the turn right after a kernel reset (a timed-out `js` call or `js_reset`). A reset
 //   during a tab attach can leave that tab failing with "Debugger unattached" until its turn ends.
+// - Ends the turn at once when Claude Code cancels a call (Esc while puppet acts): the Stop hook
+//   does not run after an interrupt, and the cancelled call gets no answer, so the turn would
+//   otherwise wait on it forever and the cursor would stay. A call with no answer after
+//   PUPPET_MAX_CALL_MS (10 min) is given up the same way, as a backstop.
 // - Records live sessions in a state file; if a previous wrapper died without ending its turn,
 //   the next start ends it before launching the server.
 // - Filters tools/list to the plugin's `enabled_tools`, minus tools marked hidden.
@@ -46,6 +50,8 @@ const META_KEY = "x-codex-turn-metadata";
 const NATIVE_PROMPTS = process.platform === "darwin" && process.env.PUPPET_NATIVE_PROMPTS !== "0";
 const PROMPT_RAISE_SECONDS = 10;
 const IDLE_TURN_MS = Number(process.env.PUPPET_IDLE_TURN_MS) || 60 * 1000;
+// cua_repl times out a `js` call itself long before this; a call still unanswered then is lost.
+const MAX_CALL_MS = Number(process.env.PUPPET_MAX_CALL_MS) || 10 * 60 * 1000;
 const STOP_HOLD_MS = Number(process.env.PUPPET_STOP_HOLD_MS) || 60 * 1000;
 const SKY_CLIENT_SUBPATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 // Codex caps a `js` result at 25,000 tokens. About 80,000 characters stays under Claude Code's own
@@ -590,6 +596,8 @@ let turnId = randomUUID();
 let turnUsed = false;
 let idleTimer = null;
 const pendingCalls = new Map(); // tools/call id -> tool name
+const callTimers = new Map(); // tools/call id -> the MAX_CALL_MS backstop
+const abandonedCalls = new Map(); // tools/call id given up on -> the turn it ran in
 let endTurnWhenIdle = false;
 
 const enabledTools = Array.isArray(cfg.enabled_tools) ? new Set(cfg.enabled_tools) : null;
@@ -669,6 +677,47 @@ function refuseWhileStopped(m) {
   return true;
 }
 
+function trackCall(id, name) {
+  pendingCalls.set(id, name);
+  clearTimeout(callTimers.get(id));
+  const timer = setTimeout(() => abandonCall(id, `no answer after ${MAX_CALL_MS / 1000} s`), MAX_CALL_MS);
+  timer.unref();
+  callTimers.set(id, timer);
+}
+
+function untrackCall(id) {
+  clearTimeout(callTimers.get(id));
+  callTimers.delete(id);
+  pendingCalls.delete(id);
+}
+
+// A call that will get no answer the wrapper waits for: Claude Code cancelled it (the user pressed
+// Esc, which runs no Stop hook), or it never came back. The turn ends now rather than waiting on it
+// forever with the cursor on screen. An answer that still arrives goes to the client as it is.
+function abandonCall(id, reason) {
+  if (!pendingCalls.has(id)) return;
+  untrackCall(id);
+  abandonedCalls.set(id, turnId);
+  activityEnd(id, { error: { message: reason } });
+  log(`call ${id}: ${reason}`);
+  endTurnWhenIdle = true;
+  callSettled();
+}
+
+// When no call is left in flight: end the turn now if a reset, the stop hook or an abandoned call
+// asked for it, else after IDLE_TURN_MS without a call.
+function callSettled() {
+  if (pendingCalls.size) return;
+  clearTimeout(idleTimer);
+  if (endTurnWhenIdle) {
+    endTurnWhenIdle = false;
+    endIdleTurn("reset, stop hook or abandoned call");
+  } else {
+    idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);
+    idleTimer.unref();
+  }
+}
+
 function forwardToServer(line) {
   let msg;
   try {
@@ -688,10 +737,12 @@ function forwardToServer(line) {
     if (m?.method === "tools/call") {
       m.params = { ...m.params, _meta: callMeta(m.params?._meta) };
       turnUsed = true;
-      pendingCalls.set(m.id, m.params?.name);
+      trackCall(m.id, m.params?.name);
       activityStart(m.id, m.params);
       prefixKernel(m);
       clearTimeout(idleTimer);
+    } else if (m?.method === "notifications/cancelled" && pendingCalls.has(m.params?.requestId)) {
+      abandonCall(m.params.requestId, "cancelled by the client");
     } else if (m?.method === "initialize") {
       // cua_repl only requests approvals from clients that advertise form elicitation.
       if (NATIVE_PROMPTS) m.params = { ...m.params, capabilities: { elicitation: {}, ...m.params?.capabilities } };
@@ -715,6 +766,15 @@ function forwardToClient(line, msg) {
     cancelledPrompts.add(msg.params.requestId);
     closeDialog(msg.params.requestId);
   }
+  // The service cannot cut a call short: a cancelled one runs to its end and can bring the cursor
+  // back after its turn ended. End that turn again once it is really over.
+  if (msg && !("method" in msg) && abandonedCalls.has(msg.id)) {
+    const turn = abandonedCalls.get(msg.id);
+    abandonedCalls.delete(msg.id);
+    log(`late answer to abandoned call ${msg.id}: ending turn ${turn} again`);
+    endTurn(rpc, SESSION_ID, turn, 5000).catch((e) => log(`turn_ended failed: ${e.message}`));
+    endSkyTurn(cfg, SESSION_ID, turn);
+  }
   if (msg && !("method" in msg) && pendingCalls.has(msg.id)) {
     const tool = pendingCalls.get(msg.id);
     if (tool === "js" && heldDocs && msg.result) {
@@ -732,7 +792,7 @@ function forwardToClient(line, msg) {
       capOutput(msg);
       line = JSON.stringify(msg);
     }
-    pendingCalls.delete(msg.id);
+    untrackCall(msg.id);
     activityEnd(msg.id, msg);
     if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
       targetBinding = null;
@@ -742,16 +802,7 @@ function forwardToClient(line, msg) {
     }
     else if (tool === "js" && !check && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
     if (tool === "js_reset" || (tool === "js" && (isKernelReset(msg) || isUserStop(msg)))) endTurnWhenIdle = true;
-    if (pendingCalls.size === 0) {
-      clearTimeout(idleTimer);
-      if (endTurnWhenIdle) {
-        endTurnWhenIdle = false;
-        endIdleTurn("reset or stop hook");
-      } else {
-        idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);
-        idleTimer.unref();
-      }
-    }
+    callSettled();
   }
   if (msg && !("method" in msg) && toolsListIds.delete(msg.id) && Array.isArray(msg.result?.tools)) {
     msg.result.tools = msg.result.tools.filter((t) => {
@@ -1112,7 +1163,7 @@ async function restartServer(reason) {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error }) + "\n");
     activityEnd(id, { error });
   }
-  pendingCalls.clear();
+  for (const id of [...pendingCalls.keys()]) untrackCall(id);
   if (turnUsed) {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);

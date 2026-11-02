@@ -6,7 +6,8 @@
 // "failfirst" fails as a first call does (with the docs of a new kernel),
 // "twoshots" answers the same image twice, "nowindow" fails as getApp does for an app
 // with no window (with the docs of a new kernel), "invalid" fails as getApp does for an
-// unknown app, "big:N" answers N characters, "ask:<message>" sends a Computer Use app prompt with
+// unknown app, "hang" never answers, "runon" answers only once the client cancelled it (the
+// service runs a cancelled call to its end), "big:N" answers N characters, "ask:<message>" sends a Computer Use app prompt with
 // that message and answers the client's reply as JSON, code calling getScreenshot answers a small
 // image, and any other code answers "ok".
 
@@ -19,6 +20,7 @@ const log = (event) => fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ 
 let initialized = false;
 let unparsed = false;
 const pending = new Map();
+const runOn = new Map(); // id of a "runon" call -> its reply
 
 log({ event: "started", analyticsDisabled: process.env.NODE_REPL_DISABLE_ANALYTICS === "1" });
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
@@ -28,6 +30,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (!initialized && msg.method !== "initialize" && "id" in msg) {
     log({ event: "died", method: msg.method });
     process.exit(1);
+  }
+  if (msg.method === "notifications/cancelled") {
+    log({ event: "cancelled", requestId: msg.params?.requestId });
+    runOn.get(msg.params?.requestId)?.({ content: [{ type: "text", text: "ran on" }] });
+    return;
   }
   if (msg.method === "initialize") {
     initialized = true;
@@ -54,6 +61,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return reply({ content: [{ type: "text", text: `[${line}:8-${line}:9]: Unexpected token: ';'` }], isError: true });
     }
     if (msg.params.arguments?.code === "crash") process.exit(3);
+    if (msg.params.arguments?.code === "hang") return;
+    if (msg.params.arguments?.code === "runon") return runOn.set(msg.id, reply);
     if (msg.params.arguments?.code === "twoshots") {
       // getScreenshot() shows its image, and nodeRepl.emitImage shows it again.
       const image = { type: "image", data: Buffer.from("same-jpeg").toString("base64"), mimeType: "image/jpeg" };
