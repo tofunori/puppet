@@ -14,6 +14,13 @@
 //   so the cursor goes away as soon as Claude finishes answering.
 // - Also ends the turn right after a kernel reset (a timed-out `js` call or `js_reset`). A reset
 //   during a tab attach can leave that tab failing with "Debugger unattached" until its turn ends.
+// - Ends the turn at once when Claude Code cancels a call (Esc while puppet acts): the Stop hook
+//   does not run after an interrupt, and the cancelled call gets no answer, so the turn would
+//   otherwise wait on it forever and the cursor would stay. A call with no answer after
+//   PUPPET_MAX_CALL_MS (10 min) is given up the same way, as a backstop.
+// - Waits, before ending a turn, for its own hidden calls (snapshot, kernel check) still running in
+//   the server, even ones that timed out here: one that finishes after turn-ended brings the
+//   cursor back, and a second turn-ended for that turn does not hide it.
 // - Records live sessions in a state file; if a previous wrapper died without ending its turn,
 //   the next start ends it before launching the server.
 // - Filters tools/list to the plugin's `enabled_tools`, minus tools marked hidden.
@@ -46,6 +53,11 @@ const META_KEY = "x-codex-turn-metadata";
 const NATIVE_PROMPTS = process.platform === "darwin" && process.env.PUPPET_NATIVE_PROMPTS !== "0";
 const PROMPT_RAISE_SECONDS = 10;
 const IDLE_TURN_MS = Number(process.env.PUPPET_IDLE_TURN_MS) || 60 * 1000;
+// cua_repl times out a `js` call itself long before this; a call still unanswered then is lost.
+const MAX_CALL_MS = Number(process.env.PUPPET_MAX_CALL_MS) || 10 * 60 * 1000;
+// How long a turn end waits for a hidden call (snapshot, kernel check) still running in the server.
+const TURN_END_WAIT_MS = Number(process.env.PUPPET_TURN_END_WAIT_MS) || 15 * 1000;
+const SNAPSHOT_TIMEOUT_MS = Number(process.env.PUPPET_SNAPSHOT_TIMEOUT_MS) || 8000;
 const STOP_HOLD_MS = Number(process.env.PUPPET_STOP_HOLD_MS) || 60 * 1000;
 const SKY_CLIENT_SUBPATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 // Codex caps a `js` result at 25,000 tokens. About 80,000 characters stays under Claude Code's own
@@ -309,9 +321,19 @@ function isAlive(pid) {
 
 // ---------- minimal JSON-RPC client over a child's stdio ----------
 
+// A request that timed out here can still be running in the server: it stays in `outstanding`
+// until its answer comes (or OUTSTANDING_MAX_MS passes), and that late answer is dropped rather
+// than sent to the client, which never asked for it.
+const OUTSTANDING_MAX_MS = 60 * 1000;
 function rpcClient(child, onOther) {
   let nextId = 0;
   const pending = new Map();
+  const outstanding = new Map(); // id -> { method, since }
+  const settleWaiters = new Set();
+  const settled = (id) => {
+    outstanding.delete(id);
+    if (![...outstanding.values()].some((o) => o.method === "tools/call")) for (const w of settleWaiters) w();
+  };
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     let msg;
     try {
@@ -323,7 +345,11 @@ function rpcClient(child, onOther) {
       const { resolve, timer } = pending.get(msg.id);
       clearTimeout(timer);
       pending.delete(msg.id);
+      settled(msg.id);
       resolve(msg);
+    } else if (msg && !("method" in msg) && outstanding.has(msg.id)) {
+      log(`late answer to ${outstanding.get(msg.id).method} ${msg.id}`);
+      settled(msg.id);
     } else {
       onOther?.(line, msg);
     }
@@ -339,7 +365,26 @@ function rpcClient(child, onOther) {
           reject(new Error(`${method} timed out`));
         }, timeoutMs);
         pending.set(id, { resolve, timer });
+        outstanding.set(id, { method, since: Date.now() });
         send({ jsonrpc: "2.0", id, method, params });
+      });
+    },
+    // Resolves once none of this wrapper's own tool calls is still running in the server, or after
+    // maxMs. A turn that ends while one runs (a snapshot that timed out here) gets its cursor back
+    // when that call finishes, and a second turn-ended for the same turn does not hide it again.
+    callsSettled(maxMs) {
+      for (const [id, o] of outstanding) if (Date.now() - o.since > OUTSTANDING_MAX_MS) outstanding.delete(id);
+      if (![...outstanding.values()].some((o) => o.method === "tools/call")) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const done = (value) => {
+          clearTimeout(timer);
+          settleWaiters.delete(waiter);
+          resolve(value);
+        };
+        const waiter = () => done(true);
+        const timer = setTimeout(() => done(false), maxMs);
+        timer.unref?.();
+        settleWaiters.add(waiter);
       });
     },
   };
@@ -590,6 +635,8 @@ let turnId = randomUUID();
 let turnUsed = false;
 let idleTimer = null;
 const pendingCalls = new Map(); // tools/call id -> tool name
+const callTimers = new Map(); // tools/call id -> the MAX_CALL_MS backstop
+const abandonedCalls = new Map(); // tools/call id given up on -> the turn it ran in
 let endTurnWhenIdle = false;
 
 const enabledTools = Array.isArray(cfg.enabled_tools) ? new Set(cfg.enabled_tools) : null;
@@ -669,6 +716,47 @@ function refuseWhileStopped(m) {
   return true;
 }
 
+function trackCall(id, name) {
+  pendingCalls.set(id, name);
+  clearTimeout(callTimers.get(id));
+  const timer = setTimeout(() => abandonCall(id, `no answer after ${MAX_CALL_MS / 1000} s`), MAX_CALL_MS);
+  timer.unref();
+  callTimers.set(id, timer);
+}
+
+function untrackCall(id) {
+  clearTimeout(callTimers.get(id));
+  callTimers.delete(id);
+  pendingCalls.delete(id);
+}
+
+// A call that will get no answer the wrapper waits for: Claude Code cancelled it (the user pressed
+// Esc, which runs no Stop hook), or it never came back. The turn ends now rather than waiting on it
+// forever with the cursor on screen. An answer that still arrives goes to the client as it is.
+function abandonCall(id, reason) {
+  if (!pendingCalls.has(id)) return;
+  untrackCall(id);
+  abandonedCalls.set(id, turnId);
+  activityEnd(id, { error: { message: reason } });
+  log(`call ${id}: ${reason}`);
+  endTurnWhenIdle = true;
+  callSettled();
+}
+
+// When no call is left in flight: end the turn now if a reset, the stop hook or an abandoned call
+// asked for it, else after IDLE_TURN_MS without a call.
+function callSettled() {
+  if (pendingCalls.size) return;
+  clearTimeout(idleTimer);
+  if (endTurnWhenIdle) {
+    endTurnWhenIdle = false;
+    endIdleTurn("reset, stop hook or abandoned call");
+  } else {
+    idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);
+    idleTimer.unref();
+  }
+}
+
 function forwardToServer(line) {
   let msg;
   try {
@@ -688,10 +776,12 @@ function forwardToServer(line) {
     if (m?.method === "tools/call") {
       m.params = { ...m.params, _meta: callMeta(m.params?._meta) };
       turnUsed = true;
-      pendingCalls.set(m.id, m.params?.name);
+      trackCall(m.id, m.params?.name);
       activityStart(m.id, m.params);
       prefixKernel(m);
       clearTimeout(idleTimer);
+    } else if (m?.method === "notifications/cancelled" && pendingCalls.has(m.params?.requestId)) {
+      abandonCall(m.params.requestId, "cancelled by the client");
     } else if (m?.method === "initialize") {
       // cua_repl only requests approvals from clients that advertise form elicitation.
       if (NATIVE_PROMPTS) m.params = { ...m.params, capabilities: { elicitation: {}, ...m.params?.capabilities } };
@@ -715,6 +805,15 @@ function forwardToClient(line, msg) {
     cancelledPrompts.add(msg.params.requestId);
     closeDialog(msg.params.requestId);
   }
+  // The service cannot cut a call short: a cancelled one runs to its end and can bring the cursor
+  // back after its turn ended. End that turn again once it is really over.
+  if (msg && !("method" in msg) && abandonedCalls.has(msg.id)) {
+    const turn = abandonedCalls.get(msg.id);
+    abandonedCalls.delete(msg.id);
+    log(`late answer to abandoned call ${msg.id}: ending turn ${turn} again`);
+    endTurn(rpc, SESSION_ID, turn, 5000).catch((e) => log(`turn_ended failed: ${e.message}`));
+    endSkyTurn(cfg, SESSION_ID, turn);
+  }
   if (msg && !("method" in msg) && pendingCalls.has(msg.id)) {
     const tool = pendingCalls.get(msg.id);
     if (tool === "js" && heldDocs && msg.result) {
@@ -732,7 +831,7 @@ function forwardToClient(line, msg) {
       capOutput(msg);
       line = JSON.stringify(msg);
     }
-    pendingCalls.delete(msg.id);
+    untrackCall(msg.id);
     activityEnd(msg.id, msg);
     if (tool === "js_reset" || (tool === "js" && isKernelReset(msg))) {
       targetBinding = null;
@@ -742,16 +841,7 @@ function forwardToClient(line, msg) {
     }
     else if (tool === "js" && !check && !msg.error && msg.result?.isError !== true) setTimeout(takeSnapshot, 0);
     if (tool === "js_reset" || (tool === "js" && (isKernelReset(msg) || isUserStop(msg)))) endTurnWhenIdle = true;
-    if (pendingCalls.size === 0) {
-      clearTimeout(idleTimer);
-      if (endTurnWhenIdle) {
-        endTurnWhenIdle = false;
-        endIdleTurn("reset or stop hook");
-      } else {
-        idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);
-        idleTimer.unref();
-      }
-    }
+    callSettled();
   }
   if (msg && !("method" in msg) && toolsListIds.delete(msg.id) && Array.isArray(msg.result?.tools)) {
     msg.result.tools = msg.result.tools.filter((t) => {
@@ -964,7 +1054,7 @@ async function takeSnapshot() {
   const app = targetApp;
   const code = `{ const __cuShot = await ${binding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
   try {
-    const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, 8000);
+    const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, SNAPSHOT_TIMEOUT_MS);
     // A call that moved to another target while the picture was taken: it shows the old one.
     if (targetBinding !== binding || targetApp !== app) return;
     const image = (reply.result?.content ?? []).find((c) => c?.type === "image" && c.data);
@@ -1023,6 +1113,7 @@ async function endIdleTurn(reason = "idle") {
   turnUsed = false;
   recordTurn();
   log(`ending turn ${endedTurn} (${reason})`);
+  if (!(await rpc.callsSettled(TURN_END_WAIT_MS))) log(`a hidden call of turn ${endedTurn} is still running; ending it anyway`);
   await Promise.all([
     endTurn(rpc, SESSION_ID, endedTurn, 5000).catch((e) => log(`turn_ended failed: ${e.message}`)),
     endSkyTurn(cfg, SESSION_ID, endedTurn),
@@ -1112,7 +1203,7 @@ async function restartServer(reason) {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error }) + "\n");
     activityEnd(id, { error });
   }
-  pendingCalls.clear();
+  for (const id of [...pendingCalls.keys()]) untrackCall(id);
   if (turnUsed) {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(endIdleTurn, IDLE_TURN_MS);
