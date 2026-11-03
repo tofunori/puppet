@@ -9,7 +9,7 @@
 // unknown app, "hang" never answers, "runon" answers only once the client cancelled it (the
 // service runs a cancelled call to its end), "big:N" answers N characters, "ask:<message>" sends a Computer Use app prompt with
 // that message and answers the client's reply as JSON, code calling getScreenshot answers a small
-// image, and any other code answers "ok".
+// image (after $FAKE_SHOT_DELAY_MS), and any other code answers "ok".
 
 import fs from "node:fs";
 import readline from "node:readline";
@@ -69,6 +69,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return reply({ content: [image, { ...image }, { type: "text", text: "done" }] });
     }
     if (/\.getScreenshot\(/.test(msg.params.arguments?.code ?? "")) {
+      // $FAKE_SHOT_DELAY_MS: a screenshot the service takes its time over.
+      const delay = Number(process.env.FAKE_SHOT_DELAY_MS) || 0;
+      const shot = { content: [{ type: "image", data: Buffer.from("fake-jpeg").toString("base64"), mimeType: "image/jpeg" }] };
+      if (delay) return setTimeout(() => { log({ event: "shot done" }); reply(shot); }, delay);
       return reply({ content: [{ type: "image", data: Buffer.from("fake-jpeg").toString("base64"), mimeType: "image/jpeg" }] });
     }
     const ask = /^ask:(.*)$/s.exec(msg.params.arguments?.code ?? "");

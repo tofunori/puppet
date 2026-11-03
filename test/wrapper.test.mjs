@@ -194,6 +194,24 @@ test("a call that never gets an answer does not keep the turn and its cursor for
   await s.close();
 });
 
+test("a turn ends only once a snapshot still running in the service has finished", async () => {
+  const ctx = setup();
+  // The snapshot times out in the wrapper (100 ms) but the service finishes it at 600 ms.
+  const s = connect(ctx, { env: { FAKE_SHOT_DELAY_MS: "600", PUPPET_SNAPSHOT_TIMEOUT_MS: "100" } });
+  const late = [];
+  s.proc.stdout.on("data", (d) => String(d).includes("puppet-wrapper-") && late.push(String(d)));
+  await s.init();
+  await s.call('let app = await cua.getApp("TextEdit");');
+  await waitFor(() => ctx.events().find((e) => e.arguments?.title === "puppet snapshot"));
+  await sleep(200); // the wrapper has given up on the snapshot; the service still takes it
+  s.proc.kill("SIGUSR2");
+  await waitFor(() => ctx.skyPayloads().length >= 1);
+  const order = ctx.events().map((e) => e.event === "shot done" ? "shot" : e.name === "turn_ended" ? "end" : null).filter(Boolean);
+  assert.deepEqual(order, ["shot", "end"], "turn_ended goes out after the snapshot finished");
+  await s.close();
+  assert.deepEqual(late, [], "the late snapshot answer is not sent to the client");
+});
+
 test("the Stop hook ends the turn of its own session only", async () => {
   const ctx = setup();
   const mine = connect(ctx);
@@ -561,7 +579,7 @@ test("keeps the state file whole when many wrappers start at once", async () => 
   assert.equal(ctx.state().length, 8);
   await Promise.all(sessions.map((s) => s.close()));
   assert.equal(ctx.state().length, 0);
-  assert.deepEqual(fs.readdirSync(path.dirname(ctx.stateFile)).sort(), ["puppet-end-turn.mjs", "puppet-server.mjs", "puppet.state.json"]);
+  assert.deepEqual(fs.readdirSync(path.dirname(ctx.stateFile)).sort(), ["puppet-end-turn.mjs", "puppet-kernel.js", "puppet-kernel.md", "puppet-server.mjs", "puppet.state.json"]);
 });
 
 test("apps listed in puppet-approvals.json are allowed without a dialog", async () => {

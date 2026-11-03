@@ -18,6 +18,9 @@
 //   does not run after an interrupt, and the cancelled call gets no answer, so the turn would
 //   otherwise wait on it forever and the cursor would stay. A call with no answer after
 //   PUPPET_MAX_CALL_MS (10 min) is given up the same way, as a backstop.
+// - Waits, before ending a turn, for its own hidden calls (snapshot, kernel check) still running in
+//   the server, even ones that timed out here: one that finishes after turn-ended brings the
+//   cursor back, and a second turn-ended for that turn does not hide it.
 // - Records live sessions in a state file; if a previous wrapper died without ending its turn,
 //   the next start ends it before launching the server.
 // - Filters tools/list to the plugin's `enabled_tools`, minus tools marked hidden.
@@ -52,6 +55,9 @@ const PROMPT_RAISE_SECONDS = 10;
 const IDLE_TURN_MS = Number(process.env.PUPPET_IDLE_TURN_MS) || 60 * 1000;
 // cua_repl times out a `js` call itself long before this; a call still unanswered then is lost.
 const MAX_CALL_MS = Number(process.env.PUPPET_MAX_CALL_MS) || 10 * 60 * 1000;
+// How long a turn end waits for a hidden call (snapshot, kernel check) still running in the server.
+const TURN_END_WAIT_MS = Number(process.env.PUPPET_TURN_END_WAIT_MS) || 15 * 1000;
+const SNAPSHOT_TIMEOUT_MS = Number(process.env.PUPPET_SNAPSHOT_TIMEOUT_MS) || 8000;
 const STOP_HOLD_MS = Number(process.env.PUPPET_STOP_HOLD_MS) || 60 * 1000;
 const SKY_CLIENT_SUBPATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 // Codex caps a `js` result at 25,000 tokens. About 80,000 characters stays under Claude Code's own
@@ -315,9 +321,19 @@ function isAlive(pid) {
 
 // ---------- minimal JSON-RPC client over a child's stdio ----------
 
+// A request that timed out here can still be running in the server: it stays in `outstanding`
+// until its answer comes (or OUTSTANDING_MAX_MS passes), and that late answer is dropped rather
+// than sent to the client, which never asked for it.
+const OUTSTANDING_MAX_MS = 60 * 1000;
 function rpcClient(child, onOther) {
   let nextId = 0;
   const pending = new Map();
+  const outstanding = new Map(); // id -> { method, since }
+  const settleWaiters = new Set();
+  const settled = (id) => {
+    outstanding.delete(id);
+    if (![...outstanding.values()].some((o) => o.method === "tools/call")) for (const w of settleWaiters) w();
+  };
   readline.createInterface({ input: child.stdout }).on("line", (line) => {
     let msg;
     try {
@@ -329,7 +345,11 @@ function rpcClient(child, onOther) {
       const { resolve, timer } = pending.get(msg.id);
       clearTimeout(timer);
       pending.delete(msg.id);
+      settled(msg.id);
       resolve(msg);
+    } else if (msg && !("method" in msg) && outstanding.has(msg.id)) {
+      log(`late answer to ${outstanding.get(msg.id).method} ${msg.id}`);
+      settled(msg.id);
     } else {
       onOther?.(line, msg);
     }
@@ -345,7 +365,26 @@ function rpcClient(child, onOther) {
           reject(new Error(`${method} timed out`));
         }, timeoutMs);
         pending.set(id, { resolve, timer });
+        outstanding.set(id, { method, since: Date.now() });
         send({ jsonrpc: "2.0", id, method, params });
+      });
+    },
+    // Resolves once none of this wrapper's own tool calls is still running in the server, or after
+    // maxMs. A turn that ends while one runs (a snapshot that timed out here) gets its cursor back
+    // when that call finishes, and a second turn-ended for the same turn does not hide it again.
+    callsSettled(maxMs) {
+      for (const [id, o] of outstanding) if (Date.now() - o.since > OUTSTANDING_MAX_MS) outstanding.delete(id);
+      if (![...outstanding.values()].some((o) => o.method === "tools/call")) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const done = (value) => {
+          clearTimeout(timer);
+          settleWaiters.delete(waiter);
+          resolve(value);
+        };
+        const waiter = () => done(true);
+        const timer = setTimeout(() => done(false), maxMs);
+        timer.unref?.();
+        settleWaiters.add(waiter);
       });
     },
   };
@@ -1015,7 +1054,7 @@ async function takeSnapshot() {
   const app = targetApp;
   const code = `{ const __cuShot = await ${binding}.getScreenshot({ emit: false }); await nodeRepl.emitImage(__cuShot); }`;
   try {
-    const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, 8000);
+    const reply = await rpc.request("tools/call", { name: "js", arguments: { code, title: "puppet snapshot" }, _meta: callMeta() }, SNAPSHOT_TIMEOUT_MS);
     // A call that moved to another target while the picture was taken: it shows the old one.
     if (targetBinding !== binding || targetApp !== app) return;
     const image = (reply.result?.content ?? []).find((c) => c?.type === "image" && c.data);
@@ -1074,6 +1113,7 @@ async function endIdleTurn(reason = "idle") {
   turnUsed = false;
   recordTurn();
   log(`ending turn ${endedTurn} (${reason})`);
+  if (!(await rpc.callsSettled(TURN_END_WAIT_MS))) log(`a hidden call of turn ${endedTurn} is still running; ending it anyway`);
   await Promise.all([
     endTurn(rpc, SESSION_ID, endedTurn, 5000).catch((e) => log(`turn_ended failed: ${e.message}`)),
     endSkyTurn(cfg, SESSION_ID, endedTurn),
